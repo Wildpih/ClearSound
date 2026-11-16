@@ -15,9 +15,11 @@ from clearsound.config import Config
 from clearsound.core.audio_utils import (
     apply_eq,
     apply_fade,
+    apply_harmonic_exciter,
     compute_spectral_envelope,
     crossfade,
     db_to_amplitude,
+    extract_percussive_transient,
     load_audio,
     match_loudness,
     save_audio,
@@ -46,6 +48,7 @@ class SoundInserter:
         volume_adjustments: Optional[Dict[int, float]] = None,
         sound_overrides: Optional[Dict[int, Path | str]] = None,
         enabled_map: Optional[Dict[int, bool]] = None,
+        vocals: Optional[np.ndarray] = None,
     ) -> np.ndarray:
         """Insert matched sounds into the no-vocals audio.
 
@@ -58,6 +61,7 @@ class SoundInserter:
             volume_adjustments: Optional per-gap volume overrides (dB).
             sound_overrides: Optional per-gap sound path overrides.
             enabled_map: Optional mapping gap_index → bool (whether to insert).
+            vocals: Optional vocal stem array for HPSS transient de-bleeding.
 
         Returns:
             Enhanced audio with the same shape as no_vocals.
@@ -116,7 +120,8 @@ class SoundInserter:
             start = gap.start_sample
             end = gap.end_sample
 
-            # ── 1. Un-muffle suppression: boost muffled frequency band ───
+            # ── 1. Un-muffle suppression & Restoration ───────────────────
+            # A. Tonal frequencies (beeps, alarms, rings)
             if gap.is_tonal and gap.dominant_freq >= 200.0:
                 try:
                     boost_db = min(9.0, max(3.0, gap.energy_loss_ratio * 12.0))
@@ -125,6 +130,33 @@ class SoundInserter:
                             result[ch, start:end] = apply_eq(result[ch, start:end], sr, gap.dominant_freq, gain_db=boost_db, q=3.5)
                     else:
                         result[start:end] = apply_eq(result[start:end], sr, gap.dominant_freq, gain_db=boost_db, q=3.5)
+                except Exception:
+                    pass
+
+            # B. HPSS Transient De-bleeding from vocal stem:
+            # Reclaim sharp explosive cracks, gunshots, impacts that Demucs leaked into vocals
+            if vocals is not None:
+                try:
+                    voc_chunk = vocals[:, start:end] if is_stereo else vocals[start:end]
+                    transient_crack = extract_percussive_transient(voc_chunk, sr=sr)
+                    if is_stereo:
+                        for ch in range(result.shape[0]):
+                            result[ch, start:end] += transient_crack[ch] * 0.85
+                    else:
+                        result[start:end] += transient_crack * 0.85
+                except Exception:
+                    pass
+
+            # C. Harmonic Exciter for muffled one-off sounds (explosions, gunshots, impacts):
+            # Synthesize natural upper harmonics (3-14 kHz) to eliminate the muffled/underwater effect
+            if gap.event_type in ["explosive_blast", "transient_impact"] or gap.category_hint == "impacts" or (gap.energy_loss_ratio > 0.35 and not gap.is_tonal):
+                try:
+                    chunk = result[:, start:end] if is_stereo else result[start:end]
+                    excited = apply_harmonic_exciter(chunk, sr=sr, cutoff_freq=2600.0, drive=2.5, mix=0.35)
+                    if is_stereo:
+                        result[:, start:end] = excited
+                    else:
+                        result[start:end] = excited
                 except Exception:
                     pass
 
@@ -191,7 +223,18 @@ class SoundInserter:
             fade_samples = int(0.003 * sr)
             return apply_fade(patch, fade_in_samples=fade_samples, fade_out_samples=fade_samples)
 
-        # ── C. Continuous Ambient Noise (Room Tone, Wind, Rain) ───────
+        # ── C. Cinematic Impacts & Explosions (One-Shot with Natural Tail) ───
+        if gap.event_type in ["explosive_blast", "transient_impact"] or gap.category_hint == "impacts":
+            # Never loop or stretch an explosion/gunshot!
+            # Keep authentic attack and let tail decay naturally.
+            usable = min(len(audio), target_len)
+            patch = np.zeros(target_len, dtype=np.float32)
+            patch[:usable] = audio[:usable] * vol_factor
+            fade_in = int(0.002 * sr)
+            fade_out = int(0.02 * sr)
+            return apply_fade(patch, fade_in_samples=fade_in, fade_out_samples=fade_out)
+
+        # ── D. Continuous Ambient Noise (Room Tone, Wind, Rain) ───────
         if len(audio) < target_len:
             repeats = (target_len // len(audio)) + 1
             audio = np.tile(audio, repeats)

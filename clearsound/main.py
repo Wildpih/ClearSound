@@ -143,7 +143,7 @@ def run_pipeline(
     # ── Step 4: Insert sounds ─────────────────────────────────────────
     console.print("\n[bold]═══ Шаг 4: Вставка звуков ═══[/]")
     inserter = SoundInserter(config)
-    enhanced = inserter.insert(no_vocals, gaps, matches, sr)
+    enhanced = inserter.insert(no_vocals, gaps, matches, sr, vocals=vocals)
 
     # ── Step 5: Interactive preview ───────────────────────────────────
     if interactive:
@@ -157,7 +157,7 @@ def run_pipeline(
         if vol_adj:
             console.print("\n[dim]Применяем коррективы...[/]")
             final_audio = inserter.insert(
-                no_vocals, gaps, matches, sr, volume_adjustments=vol_adj
+                no_vocals, gaps, matches, sr, volume_adjustments=vol_adj, vocals=vocals
             )
     else:
         final_audio = enhanced

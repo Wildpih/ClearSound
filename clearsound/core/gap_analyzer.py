@@ -26,6 +26,7 @@ from clearsound.core.audio_utils import (
     compute_spectral_centroid,
     compute_spectral_envelope,
     compute_spectral_flatness,
+    compute_tonal_signature,
     format_time,
     samples_to_seconds,
     seconds_to_samples,
@@ -256,33 +257,31 @@ class GapAnalyzer:
 
         # Acoustic event analysis inside the gap
         dur_sec = (end - start) / sr
-        dom_freq_novoc, peak_ratio_novoc = compute_dominant_frequency(novoc_segment, sr, min_freq=200.0)
-        dom_freq_orig, peak_ratio_orig = compute_dominant_frequency(orig_segment, sr, min_freq=200.0)
+        dom_freq_novoc, peak_ratio_novoc, is_tonal_novoc = compute_tonal_signature(novoc_segment, sr, min_freq=450.0)
+        dom_freq_orig, peak_ratio_orig, is_tonal_orig = compute_tonal_signature(orig_segment, sr, min_freq=450.0)
 
         flatness_novoc = compute_spectral_flatness(novoc_segment)
         flatness_orig = compute_spectral_flatness(orig_segment)
         tonality_novoc = float(np.clip(1.0 - flatness_novoc, 0.0, 1.0))
         tonality_orig = float(np.clip(1.0 - flatness_orig, 0.0, 1.0))
-        crest = compute_crest_factor(novoc_segment)
+        crest_novoc = compute_crest_factor(novoc_segment)
+        crest_orig = compute_crest_factor(orig_segment)
+        max_crest = max(crest_novoc, crest_orig)
 
-        # Priority to muffled tone signature in no_vocals
-        if peak_ratio_novoc >= 2.5 and dom_freq_novoc >= 200.0:
-            dom_freq = dom_freq_novoc
-            tonality = tonality_novoc
-        elif peak_ratio_orig >= 3.5 and dom_freq_orig >= 500.0:
-            dom_freq = dom_freq_orig
-            tonality = tonality_orig
-        else:
-            dom_freq = dom_freq_novoc
-            tonality = tonality_novoc
+        is_tonal = is_tonal_novoc or is_tonal_orig
+        dom_freq = dom_freq_novoc if is_tonal_novoc else dom_freq_orig
+        tonality = tonality_novoc if is_tonal_novoc else tonality_orig
 
-        is_tonal = bool(tonality > 0.35 and (peak_ratio_novoc >= 2.5 or peak_ratio_orig >= 3.5) and dom_freq >= 200.0)
-        is_transient = bool(crest > 3.0 and dur_sec <= 0.6)
+        is_transient = bool(max_crest > 3.0 and dur_sec <= 0.6)
+        is_impact = bool((max_crest >= 4.0 or (orig_energy > 0.15 and energy_loss > 0.25)) and not is_tonal)
 
         # Infer category and event type strictly based on acoustic properties
         if is_tonal:
             event_type = "tonal_beep"
             category = "alerts"
+        elif is_impact:
+            event_type = "explosive_blast" if dur_sec >= 0.9 else "transient_impact"
+            category = "impacts"
         elif is_transient:
             event_type = "transient_foley"
             category = "foley"
@@ -345,8 +344,10 @@ class GapAnalyzer:
             sound_desc = gap.event_type
             if gap.is_tonal:
                 sound_desc = f"Писк/Тон ({gap.dominant_freq:.0f} Гц)"
+            elif gap.event_type in ["explosive_blast", "transient_impact"] or gap.category_hint == "impacts":
+                sound_desc = "💥 Взрыв/Выстрел" if gap.event_type == "explosive_blast" else "💥 Удар/Импульс"
             elif gap.is_transient:
-                sound_desc = "Импульс/Фоли"
+                sound_desc = "🔨 Фоли/Шаг/Клик"
             table.add_row(
                 str(i),
                 format_time(gap.start_sec),

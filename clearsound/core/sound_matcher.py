@@ -162,9 +162,19 @@ class SoundMatcher:
                         sim += 0.15
                 elif cat_lower == "alerts":
                     # Library alert sound (alarm, beep, ring)
-                    sim += 0.25
-                elif cat_lower in ["ambient", "nature", "urban"] or any(w in name_lower for w in ["wind", "rain", "noise", "traffic", "city_hum"]):
-                    # NEVER insert continuous atmospheric noise into an alarm beep!
+                    sim = 0.70 + 0.25 * sim
+                else:
+                    # NEVER insert non-alert sounds into an alarm beep!
+                    sim = 0.02
+
+            # If gap is an explosive blast or gunshot/impact:
+            elif gap.event_type in ["explosive_blast", "transient_impact"] or gap.category_hint == "impacts":
+                if is_donor and donor_obj and (donor_obj.is_transient or donor_obj.crest_factor > 3.0):
+                    sim = 0.96
+                elif cat_lower == "impacts":
+                    sim = 0.70 + 0.25 * sim
+                else:
+                    # NEVER insert alarm beeps, drones, or ambient noise into an explosion!
                     sim = 0.02
 
             # If gap is a transient foley (knock, click, tap):
@@ -172,9 +182,8 @@ class SoundMatcher:
                 if is_donor and donor_obj and donor_obj.is_transient:
                     sim = 0.92
                 elif cat_lower == "foley":
-                    sim += 0.20
-                elif cat_lower in ["ambient", "nature"] or any(w in name_lower for w in ["wind", "rain"]):
-                    # NEVER insert wind or rain into a knock or footstep!
+                    sim = 0.65 + 0.25 * sim
+                else:
                     sim = 0.02
 
             # If gap is short (< 0.8s):

@@ -56,7 +56,7 @@ class SoundEntry:
 class SoundLibrary:
     """Manages the local collection of replacement sounds."""
 
-    KNOWN_CATEGORIES = {"alerts", "foley", "ambient", "music", "nature", "urban", "donor"}
+    KNOWN_CATEGORIES = {"alerts", "impacts", "foley", "ambient", "music", "nature", "urban", "donor"}
     INDEX_FILE = "library_index.json"
 
     def __init__(self, config: Config):
@@ -280,6 +280,14 @@ class SoundLibrary:
             ("foley", "footstep_floor", lambda: _footstep_floor(sr, 0.5)),
             ("foley", "keyboard_tap", lambda: _keyboard_tap(sr, 0.2)),
             ("foley", "glass_clink", lambda: _glass_clink(sr, 0.6)),
+
+            # ── Cinematic Impacts & Explosions ────────────────────────
+            ("impacts", "explosion_heavy_blast", lambda: _explosion_heavy_blast(sr, 3.5)),
+            ("impacts", "gunshot_pistol_crack", lambda: _gunshot_pistol_crack(sr, 1.0)),
+            ("impacts", "shotgun_blast_heavy", lambda: _shotgun_blast_heavy(sr, 1.8)),
+            ("impacts", "thunder_strike_close", lambda: _thunder_strike_close(sr, 4.0)),
+            ("impacts", "glass_shatter_large", lambda: _glass_shatter_large(sr, 1.5)),
+            ("impacts", "car_crash_metal", lambda: _car_crash_metal(sr, 2.0)),
 
             # ── Ambience & Backgrounds ────────────────────────────────
             ("ambient", "room_tone", lambda: _room_tone(sr, 5.0)),
@@ -655,3 +663,128 @@ def _glass_clink(sr: int, duration: float = 0.6) -> np.ndarray:
     t = np.linspace(0, duration, samples, endpoint=False)
     clink = (0.6 * np.sin(2 * np.pi * 3100 * t) + 0.4 * np.sin(2 * np.pi * 4650 * t)) * np.exp(-t * 9.0)
     return (clink / (np.max(np.abs(clink)) + 1e-8) * 0.70).astype(np.float32)
+
+
+# ── Cinematic Impacts & Explosions ────────────────────────────────────
+
+def _explosion_heavy_blast(sr: int, duration: float = 3.5) -> np.ndarray:
+    """Deep cinematic explosion: detonation shockwave, sub-rumble, and debris decay."""
+    from scipy.signal import butter, sosfilt
+    samples = int(sr * duration)
+    t = np.linspace(0, duration, samples, endpoint=False)
+
+    # Detonation shockwave transient (first 30ms)
+    transient = np.exp(-t * 85.0) * (np.random.randn(samples) * 0.9 + np.sin(2 * np.pi * np.linspace(350, 45, samples) * t))
+
+    # Visceral sub-rumble (42-70 Hz)
+    sub = (0.6 * np.sin(2 * np.pi * 45 * t) + 0.4 * np.sin(2 * np.pi * 68 * t)) * np.exp(-t * 2.0)
+
+    # Filtered debris rumble
+    sos = butter(2, min(550, sr * 0.45), btype="lowpass", fs=sr, output="sos")
+    debris = sosfilt(sos, np.random.randn(samples)) * np.exp(-t * 1.1) * (0.5 + 0.5 * np.sin(2 * np.pi * 3.5 * t))
+
+    raw = transient * 1.6 + sub * 1.3 + debris * 0.8
+    out = np.tanh(raw * 1.8)
+    return (out / (np.max(np.abs(out)) + 1e-8) * 0.90).astype(np.float32)
+
+
+def _gunshot_pistol_crack(sr: int, duration: float = 1.0) -> np.ndarray:
+    """Sharp supersonic firearm report: impulse crack, 130 Hz body, and room reverb."""
+    from scipy.signal import butter, sosfilt
+    samples = int(sr * duration)
+    t = np.linspace(0, duration, samples, endpoint=False)
+
+    crack_samples = int(0.005 * sr)
+    crack_noise = np.random.randn(crack_samples)
+    sos_hp = butter(3, min(2600, sr * 0.45), btype="highpass", fs=sr, output="sos")
+    crack = np.zeros(samples)
+    crack[:crack_samples] = sosfilt(sos_hp, crack_noise) * np.exp(-np.linspace(0, 1, crack_samples) * 16.0) * 2.8
+
+    blast = np.sin(2 * np.pi * 130 * t) * np.exp(-t * 42.0)
+
+    sos_lp = butter(2, min(1700, sr * 0.45), btype="lowpass", fs=sr, output="sos")
+    tail = sosfilt(sos_lp, np.random.randn(samples)) * np.exp(-t * 5.2) * 0.4
+
+    raw = crack + blast * 1.2 + tail
+    out = np.tanh(raw * 2.0)
+    return (out / (np.max(np.abs(out)) + 1e-8) * 0.90).astype(np.float32)
+
+
+def _shotgun_blast_heavy(sr: int, duration: float = 1.8) -> np.ndarray:
+    """Heavy 12-gauge shotgun blast with wide spread transient and concussive punch."""
+    from scipy.signal import butter, sosfilt
+    samples = int(sr * duration)
+    t = np.linspace(0, duration, samples, endpoint=False)
+
+    # Wide blast attack
+    blast_samples = int(0.015 * sr)
+    burst = np.zeros(samples)
+    burst[:blast_samples] = np.random.randn(blast_samples) * np.exp(-np.linspace(0, 1, blast_samples) * 6.0)
+
+    # Concussive punch (55 Hz + 85 Hz)
+    punch = (0.7 * np.sin(2 * np.pi * 55 * t) + 0.3 * np.sin(2 * np.pi * 85 * t)) * np.exp(-t * 18.0)
+
+    # Powder sizzle and broad tail
+    sos_lp = butter(2, min(1200, sr * 0.45), btype="lowpass", fs=sr, output="sos")
+    tail = sosfilt(sos_lp, np.random.randn(samples)) * np.exp(-t * 2.8) * 0.5
+
+    raw = burst * 2.2 + punch * 1.4 + tail
+    out = np.tanh(raw * 1.7)
+    return (out / (np.max(np.abs(out)) + 1e-8) * 0.92).astype(np.float32)
+
+
+def _thunder_strike_close(sr: int, duration: float = 4.0) -> np.ndarray:
+    """Close lightning strike: tearing high arc rip and cavernous rolling thunder."""
+    from scipy.signal import butter, sosfilt
+    samples = int(sr * duration)
+    t = np.linspace(0, duration, samples, endpoint=False)
+
+    sos_arc = butter(2, min(1100, sr * 0.45), btype="highpass", fs=sr, output="sos")
+    arc = sosfilt(sos_arc, np.random.randn(samples)) * np.exp(-t * 22.0) * 1.8
+
+    sub = (0.5 * np.sin(2 * np.pi * 38 * t) + 0.3 * np.sin(2 * np.pi * 60 * t)) * np.exp(-t * 1.4)
+
+    sos_rumble = butter(2, min(260, sr * 0.45), btype="lowpass", fs=sr, output="sos")
+    rumble = sosfilt(sos_rumble, np.random.randn(samples)) * np.exp(-t * 0.75) * (0.6 + 0.4 * np.sin(2 * np.pi * 2.2 * t))
+
+    raw = arc + sub * 1.3 + rumble * 1.1
+    out = np.tanh(raw * 1.5)
+    return (out / (np.max(np.abs(out)) + 1e-8) * 0.88).astype(np.float32)
+
+
+def _glass_shatter_large(sr: int, duration: float = 1.5) -> np.ndarray:
+    """Large pane glass shatter: sharp impact snap and shower of crystalline shards."""
+    samples = int(sr * duration)
+    t = np.linspace(0, duration, samples, endpoint=False)
+
+    # Initial impact
+    impact = np.exp(-t * 45.0) * (0.5 * np.sin(2 * np.pi * 180 * t) + 0.5 * np.random.randn(samples))
+
+    # Crystalline resonating shards
+    shards = (
+        0.30 * np.sin(2 * np.pi * 3800 * t) * np.exp(-t * 8.0)
+        + 0.25 * np.sin(2 * np.pi * 5200 * t) * np.exp(-t * 11.0)
+        + 0.25 * np.sin(2 * np.pi * 7100 * t) * np.exp(-t * 14.0)
+        + 0.20 * np.sin(2 * np.pi * 9400 * t) * np.exp(-t * 16.0)
+        + 0.35 * np.random.randn(samples) * np.exp(-t * 6.5)
+    )
+    raw = impact * 1.4 + shards
+    return (raw / (np.max(np.abs(raw)) + 1e-8) * 0.82).astype(np.float32)
+
+
+def _car_crash_metal(sr: int, duration: float = 2.0) -> np.ndarray:
+    """Metal collision impact: heavy structural thump and crumpled resonant metal."""
+    from scipy.signal import butter, sosfilt
+    samples = int(sr * duration)
+    t = np.linspace(0, duration, samples, endpoint=False)
+
+    # Low structural thump
+    thump = np.sin(2 * np.pi * 75 * t) * np.exp(-t * 20.0)
+
+    # Metal crumple
+    sos_bp = butter(2, [min(400, sr * 0.4), min(1800, sr * 0.45)], btype="bandpass", fs=sr, output="sos")
+    metal = sosfilt(sos_bp, np.random.randn(samples)) * np.exp(-t * 5.0) * (0.5 + 0.5 * np.sin(2 * np.pi * 12 * t))
+
+    raw = thump * 1.3 + metal * 1.5
+    out = np.tanh(raw * 1.6)
+    return (out / (np.max(np.abs(out)) + 1e-8) * 0.85).astype(np.float32)

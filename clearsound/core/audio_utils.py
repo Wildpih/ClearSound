@@ -271,6 +271,36 @@ def compute_dominant_frequency(audio: np.ndarray, sr: int = 44100, min_freq: flo
     return float(freqs_v[idx]), ratio
 
 
+def compute_tonal_signature(audio: np.ndarray, sr: int = 44100, min_freq: float = 450.0) -> Tuple[float, float, bool]:
+    """Find dominant tonal frequency, prominence ratio, and whether the signal is genuinely tonal.
+
+    Returns:
+        (dominant_freq_hz, prominence_ratio, is_genuinely_tonal)
+    """
+    if audio.ndim > 1:
+        audio = np.mean(audio, axis=0)
+    if len(audio) < 256:
+        return 0.0, 0.0, False
+    from scipy.fft import rfft, rfftfreq
+    spec = np.abs(rfft(audio))
+    freqs = rfftfreq(len(audio), 1.0 / sr)
+    valid = (freqs >= min_freq) & (freqs <= min(sr / 2.0, 8000.0))
+    if not np.any(valid):
+        return 0.0, 0.0, False
+    spec_v = spec[valid]
+    freqs_v = freqs[valid]
+    idx = np.argmax(spec_v)
+    peak_val = float(spec_v[idx])
+    mean_val = float(np.mean(spec_v)) + 1e-9
+    ratio = peak_val / mean_val
+    sorted_s = np.sort(spec_v)[::-1]
+    top_energy = np.sum(sorted_s[:5])
+    total_energy = np.sum(spec_v) + 1e-9
+    concentration = float(top_energy / total_energy)
+    is_tonal = bool(ratio >= 45.0 and concentration >= 0.04 and peak_val > 1e-4)
+    return float(freqs_v[idx]), ratio, is_tonal
+
+
 def compute_crest_factor(audio: np.ndarray) -> float:
     """Compute peak-to-RMS crest factor to detect impulsive transients (clicks, knocks)."""
     if audio.ndim > 1:
@@ -278,6 +308,55 @@ def compute_crest_factor(audio: np.ndarray) -> float:
     rms = np.sqrt(np.mean(audio ** 2)) + 1e-9
     peak = np.max(np.abs(audio))
     return float(peak / rms)
+
+
+def extract_percussive_transient(audio: np.ndarray, sr: int = 44100) -> np.ndarray:
+    """Extract non-vocal percussive transients (gunshot cracks, explosion attacks, clicks)
+    from a signal (such as the vocal stem) using Harmonic-Percussive Source Separation (HPSS).
+
+    Reclaims sharp non-vocal attack energy that was mistakenly leaked into the vocal stem.
+    """
+    is_stereo = audio.ndim > 1
+    if is_stereo:
+        channels = []
+        for ch in range(audio.shape[0]):
+            _, p = librosa.effects.hpss(audio[ch])
+            channels.append(p)
+        return np.vstack(channels).astype(np.float32)
+    else:
+        _, p = librosa.effects.hpss(audio)
+        return p.astype(np.float32)
+
+
+def apply_harmonic_exciter(
+    audio: np.ndarray,
+    sr: int = 44100,
+    cutoff_freq: float = 2800.0,
+    drive: float = 3.0,
+    mix: float = 0.40,
+) -> np.ndarray:
+    """Generate high-frequency harmonic overtones via non-linear saturation
+    to un-muffle dull explosions, gunshots, or muffled foley."""
+    from scipy.signal import butter, sosfilt
+
+    is_stereo = audio.ndim > 1
+    ch_list = [audio[ch] for ch in range(audio.shape[0])] if is_stereo else [audio]
+    out_list = []
+
+    sos_hp = butter(3, min(cutoff_freq, sr * 0.45), btype="highpass", fs=sr, output="sos")
+    sos_bp = butter(2, [300 / (sr / 2), min(2500, sr * 0.45) / (sr / 2)], btype="bandpass", output="sos")
+
+    for mono in ch_list:
+        mids = sosfilt(sos_bp, mono)
+        peak = float(np.max(np.abs(mids))) + 1e-8
+        mids_norm = mids / peak
+        saturated = np.tanh(mids_norm * drive)
+        harmonics = sosfilt(sos_hp, saturated) * peak
+        enhanced = mono + mix * harmonics
+        out_list.append(enhanced)
+
+    result = np.vstack(out_list) if is_stereo else out_list[0]
+    return result.astype(np.float32)
 
 
 def amplitude_to_db(amplitude: float) -> float:
