@@ -19,10 +19,13 @@ from rich.table import Table
 from clearsound.config import Config
 from clearsound.core.audio_utils import (
     amplitude_to_db,
+    compute_crest_factor,
+    compute_dominant_frequency,
     compute_mfcc,
     compute_rms_energy,
     compute_spectral_centroid,
     compute_spectral_envelope,
+    compute_spectral_flatness,
     format_time,
     samples_to_seconds,
     seconds_to_samples,
@@ -40,7 +43,7 @@ class GapInfo:
     end_sample: int
     sample_rate: int
 
-    # Spectral fingerprint of the *surrounding* non-vocal audio
+    # Spectral fingerprint of the surrounding audio
     mfcc_profile: np.ndarray = field(repr=False, default=None)
     spectral_envelope: np.ndarray = field(repr=False, default=None)
     avg_rms: float = 0.0
@@ -51,6 +54,13 @@ class GapInfo:
 
     # How much energy was lost (ratio of energy in no-vocals vs original)
     energy_loss_ratio: float = 0.0
+
+    # Specific acoustic event properties (for beeps, alarms, transients, etc.)
+    dominant_freq: float = 0.0
+    tonality: float = 0.0
+    is_tonal: bool = False
+    is_transient: bool = False
+    event_type: str = "ambient_diffuse"  # "tonal_beep", "transient_foley", "harmonic_music", "ambient_diffuse"
 
     @property
     def start_sec(self) -> float:
@@ -244,8 +254,45 @@ class GapAnalyzer:
         novoc_energy = np.sqrt(np.mean(novoc_segment ** 2)) if len(novoc_segment) > 0 else 0
         energy_loss = 1.0 - (novoc_energy / max(orig_energy, 1e-10))
 
-        # Infer category from spectral characteristics
-        category = self._infer_category(avg_centroid, avg_rms, sr)
+        # Acoustic event analysis inside the gap
+        dur_sec = (end - start) / sr
+        dom_freq_novoc, peak_ratio_novoc = compute_dominant_frequency(novoc_segment, sr, min_freq=200.0)
+        dom_freq_orig, peak_ratio_orig = compute_dominant_frequency(orig_segment, sr, min_freq=200.0)
+
+        flatness_novoc = compute_spectral_flatness(novoc_segment)
+        flatness_orig = compute_spectral_flatness(orig_segment)
+        tonality_novoc = float(np.clip(1.0 - flatness_novoc, 0.0, 1.0))
+        tonality_orig = float(np.clip(1.0 - flatness_orig, 0.0, 1.0))
+        crest = compute_crest_factor(novoc_segment)
+
+        # Priority to muffled tone signature in no_vocals
+        if peak_ratio_novoc >= 2.5 and dom_freq_novoc >= 200.0:
+            dom_freq = dom_freq_novoc
+            tonality = tonality_novoc
+        elif peak_ratio_orig >= 3.5 and dom_freq_orig >= 500.0:
+            dom_freq = dom_freq_orig
+            tonality = tonality_orig
+        else:
+            dom_freq = dom_freq_novoc
+            tonality = tonality_novoc
+
+        is_tonal = bool(tonality > 0.35 and (peak_ratio_novoc >= 2.5 or peak_ratio_orig >= 3.5) and dom_freq >= 200.0)
+        is_transient = bool(crest > 3.0 and dur_sec <= 0.6)
+
+        # Infer category and event type strictly based on acoustic properties
+        if is_tonal:
+            event_type = "tonal_beep"
+            category = "alerts"
+        elif is_transient:
+            event_type = "transient_foley"
+            category = "foley"
+        elif dur_sec < 0.8:
+            # Short intervals are discrete foley/room sounds, never ambient wind or rain!
+            event_type = "transient_foley"
+            category = "foley"
+        else:
+            event_type = "ambient_diffuse"
+            category = self._infer_category(avg_centroid, avg_rms, sr)
 
         return GapInfo(
             start_sample=start,
@@ -257,6 +304,11 @@ class GapAnalyzer:
             spectral_centroid=avg_centroid,
             energy_loss_ratio=energy_loss,
             category_hint=category,
+            dominant_freq=dom_freq,
+            tonality=tonality,
+            is_tonal=is_tonal,
+            is_transient=is_transient,
+            event_type=event_type,
         )
 
     def _infer_category(self, centroid: float, rms: float, sr: int) -> str:
@@ -287,8 +339,14 @@ class GapAnalyzer:
         table.add_column("Длительность", style="green")
         table.add_column("Потеря энергии", style="yellow")
         table.add_column("Категория", style="magenta")
+        table.add_column("Тип звука", style="bold cyan")
 
         for i, gap in enumerate(gaps, 1):
+            sound_desc = gap.event_type
+            if gap.is_tonal:
+                sound_desc = f"Писк/Тон ({gap.dominant_freq:.0f} Гц)"
+            elif gap.is_transient:
+                sound_desc = "Импульс/Фоли"
             table.add_row(
                 str(i),
                 format_time(gap.start_sec),
@@ -296,6 +354,7 @@ class GapAnalyzer:
                 f"{gap.duration_sec:.2f}с",
                 f"{gap.energy_loss_ratio:.0%}",
                 gap.category_hint,
+                sound_desc,
             )
 
         console.print(table)

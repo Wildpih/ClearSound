@@ -29,6 +29,8 @@ from clearsound.core.sound_matcher import MatchResult
 from clearsound.library.sound_library import SoundLibrary
 
 CATEGORY_BADGES = {
+    "alerts": ("⏰ Alerts", "background-color: #3f2504; color: #facc15; border: 1px solid #eab308; font-weight: bold; border-radius: 4px; padding: 2px 6px;"),
+    "donor": ("🎯 Donor", "background-color: #052e16; color: #4ade80; border: 1px solid #22c55e; font-weight: bold; border-radius: 4px; padding: 2px 6px;"),
     "ambient": ("🌊 Ambient", "background-color: #0b2d2a; color: #00f0cf; border: 1px solid #00d2b4; font-weight: bold; border-radius: 4px; padding: 2px 6px;"),
     "nature": ("🍃 Nature", "background-color: #0e3020; color: #34d399; border: 1px solid #10b981; font-weight: bold; border-radius: 4px; padding: 2px 6px;"),
     "music": ("🎵 Music", "background-color: #261942; color: #c4b5fd; border: 1px solid #8b5cf6; font-weight: bold; border-radius: 4px; padding: 2px 6px;"),
@@ -194,10 +196,12 @@ class SegmentEditorWidget(QWidget):
             # Add match recommendations
             for match in gap_matches:
                 score_pct = int(match.similarity_score * 100)
-                combo_sound.addItem(
-                    f"⭐ {match.sound.name} ({match.sound.category}, {score_pct}%)",
-                    str(match.sound.path)
-                )
+                if match.is_donor:
+                    prefix = "" if match.sound.name.startswith("🎯") else "🎯 "
+                    label = f"{prefix}{match.sound.name} [{score_pct}% совпадение]"
+                else:
+                    label = f"⭐ {match.sound.name} ({match.sound.category}) [{score_pct}%]"
+                combo_sound.addItem(label, str(match.sound.path))
 
             # Add library separator and all library sounds
             combo_sound.insertSeparator(combo_sound.count())

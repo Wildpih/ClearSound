@@ -506,8 +506,10 @@ class MainWindow(QMainWindow):
             matches=self.current_project.matches,
         )
 
+        donors_count = len(result.get("donors", []))
+        donor_str = f" Найдено {donors_count} чистых звуков-доноров из самого ролика." if donors_count > 0 else ""
         self.label_status.setText(
-            f"✅ Проект «{self.current_project.name}» успешно обработан! Обнаружено {len(self.current_project.gaps)} сегментов. "
+            f"✅ Проект «{self.current_project.name}» успешно обработан! Обнаружено {len(self.current_project.gaps)} сегментов.{donor_str} "
             f"Проверяйте видео в плеере с новыми звуками."
         )
 

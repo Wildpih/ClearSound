@@ -13,6 +13,8 @@ from clearsound.core.audio_utils import format_time
 from clearsound.core.gap_analyzer import GapInfo
 
 CATEGORY_COLORS = {
+    "alerts": QColor("#eab308"),
+    "donor": QColor("#22c55e"),
     "ambient": QColor("#00d2b4"),
     "nature": QColor("#10b981"),
     "music": QColor("#8b5cf6"),

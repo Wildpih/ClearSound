@@ -133,6 +133,11 @@ class ProjectManager:
                 "spectral_centroid": gap.spectral_centroid,
                 "category_hint": gap.category_hint,
                 "energy_loss_ratio": gap.energy_loss_ratio,
+                "dominant_freq": gap.dominant_freq,
+                "tonality": gap.tonality,
+                "is_tonal": gap.is_tonal,
+                "is_transient": gap.is_transient,
+                "event_type": gap.event_type,
             }
             serialized_gaps.append(gap_dict)
             mfcc_list.append(gap.mfcc_profile if gap.mfcc_profile is not None else np.array([]))
@@ -223,6 +228,11 @@ class ProjectManager:
                     spectral_centroid=g.get("spectral_centroid", 0.0),
                     category_hint=g.get("category_hint", "ambient"),
                     energy_loss_ratio=g.get("energy_loss_ratio", 0.0),
+                    dominant_freq=g.get("dominant_freq", 0.0),
+                    tonality=g.get("tonality", 0.0),
+                    is_tonal=g.get("is_tonal", False),
+                    is_transient=g.get("is_transient", False),
+                    event_type=g.get("event_type", "ambient_diffuse"),
                 )
                 gaps.append(gap)
             project.gaps = gaps

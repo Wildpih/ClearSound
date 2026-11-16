@@ -16,6 +16,7 @@ from clearsound.core.audio_utils import (
     load_audio,
     save_audio,
 )
+from clearsound.core.donor_extractor import DonorExtractor, DonorSound
 from clearsound.core.gap_analyzer import GapAnalyzer, GapInfo
 from clearsound.core.sound_inserter import SoundInserter
 from clearsound.core.sound_matcher import MatchResult, SoundMatcher
@@ -63,19 +64,23 @@ class PipelineWorker(QThread):
             no_vocals_wav = self.config.temp_dir / f"{self.input_path.stem}_no_vocals.wav"
             save_audio(no_vocals, no_vocals_wav, sr)
 
-            # ── Step 2: Gap Analysis ──────────────────────────────────
-            self.progress.emit("Анализ голосовых сегментов и спектральных пробелов...", 60)
+            # ── Step 2: Gap Analysis & Donor Sound Extraction ─────────
+            self.progress.emit("Анализ пауз и поиск чистых звуков-доноров в видео...", 55)
             analyzer = GapAnalyzer(self.config)
             gaps = analyzer.analyze(original, no_vocals, vocals, sr)
 
+            vocal_regions = [(g.start_sample, g.end_sample) for g in gaps]
+            donor_extractor = DonorExtractor(self.config.temp_dir)
+            donors = donor_extractor.extract_donors(no_vocals, vocal_regions, sr=sr)
+
             # ── Step 3: Sound Matching ────────────────────────────────
-            self.progress.emit("Поиск подходящих звуков в библиотеке...", 75)
+            self.progress.emit("Умный подбор звуков (доноры из ролика + библиотека)...", 75)
             if self.library.count() == 0:
                 self.library.generate_basic_sounds()
             matcher = SoundMatcher(self.config, self.library)
-            matches = matcher.find_matches(gaps)
+            matches = matcher.find_matches(gaps, donors=donors)
 
-            # ── Step 4: Sound Insertion ───────────────────────────────
+            # ── Step 4: Sound Insertion & Muffle Boost ────────────────
             self.progress.emit("Восстановление звучания и вставка звуков...", 85)
             inserter = SoundInserter(self.config)
             enhanced = inserter.insert(no_vocals, gaps, matches, sr)
@@ -110,6 +115,7 @@ class PipelineWorker(QThread):
                 "vocals": vocals,
                 "gaps": gaps,
                 "matches": matches,
+                "donors": donors,
                 "enhanced": enhanced,
                 "no_vocals_wav": no_vocals_wav,
                 "enhanced_wav": enhanced_wav,

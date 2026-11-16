@@ -56,7 +56,7 @@ class SoundEntry:
 class SoundLibrary:
     """Manages the local collection of replacement sounds."""
 
-    KNOWN_CATEGORIES = {"ambient", "music", "nature", "urban", "foley"}
+    KNOWN_CATEGORIES = {"alerts", "foley", "ambient", "music", "nature", "urban", "donor"}
     INDEX_FILE = "library_index.json"
 
     def __init__(self, config: Config):
@@ -263,17 +263,33 @@ class SoundLibrary:
         generated = 0
 
         sounds_to_generate = [
-            # (category, name, generator_func)
-            ("ambient", "white_noise_soft", lambda: _white_noise(sr, 5.0, 0.35)),
-            ("ambient", "pink_noise_soft", lambda: _pink_noise(sr, 5.0, 0.40)),
-            ("ambient", "brown_noise", lambda: _brown_noise(sr, 5.0, 0.45)),
+            # ── Alerts & Tones (Alarms, Beeps, Rings) ─────────────────
+            ("alerts", "alarm_beep_digital", lambda: _alarm_beep_digital(sr, 3.0)),
+            ("alerts", "alarm_beep_fast", lambda: _alarm_beep_fast(sr, 2.0)),
+            ("alerts", "alarm_beep_single", lambda: _alarm_beep_single(sr, 0.25)),
+            ("alerts", "alarm_clock_bell", lambda: _alarm_clock_bell(sr, 2.5)),
+            ("alerts", "digital_timer_beep", lambda: _digital_timer_beep(sr, 1.5)),
+            ("alerts", "phone_ring_digital", lambda: _phone_ring_digital(sr, 3.0)),
+            ("alerts", "microwave_chime", lambda: _microwave_chime(sr, 1.2)),
+            ("alerts", "ui_beep_high", lambda: _ui_beep_high(sr, 0.3)),
+
+            # ── Foley & Physical Transients ───────────────────────────
+            ("foley", "door_knock_wood", lambda: _door_knock_wood(sr, 0.8)),
+            ("foley", "switch_click", lambda: _switch_click(sr, 0.2)),
+            ("foley", "clock_tick", lambda: _clock_tick(sr, 1.5)),
+            ("foley", "footstep_floor", lambda: _footstep_floor(sr, 0.5)),
+            ("foley", "keyboard_tap", lambda: _keyboard_tap(sr, 0.2)),
+            ("foley", "glass_clink", lambda: _glass_clink(sr, 0.6)),
+
+            # ── Ambience & Backgrounds ────────────────────────────────
             ("ambient", "room_tone", lambda: _room_tone(sr, 5.0)),
-            ("nature", "wind_gentle", lambda: _wind_sound(sr, 5.0, 0.45)),
-            ("nature", "rain_light", lambda: _rain_sound(sr, 5.0, 0.50)),
+            ("ambient", "white_noise_soft", lambda: _white_noise(sr, 5.0, 0.30)),
+            ("ambient", "pink_noise_soft", lambda: _pink_noise(sr, 5.0, 0.35)),
+            ("ambient", "brown_noise", lambda: _brown_noise(sr, 5.0, 0.40)),
+            ("nature", "wind_gentle", lambda: _wind_sound(sr, 5.0, 0.35)),
+            ("nature", "rain_light", lambda: _rain_sound(sr, 5.0, 0.40)),
             ("urban", "city_hum", lambda: _city_hum(sr, 5.0)),
             ("urban", "traffic_distant", lambda: _traffic_distant(sr, 5.0)),
-            ("foley", "room_ambience", lambda: _room_ambience(sr, 5.0)),
-            ("foley", "subtle_pad", lambda: _subtle_pad(sr, 5.0)),
             ("music", "drone_low", lambda: _drone_low(sr, 5.0)),
             ("music", "pad_warm", lambda: _pad_warm(sr, 5.0)),
         ]
@@ -467,4 +483,175 @@ def _pad_warm(sr: int, duration: float) -> np.ndarray:
     envelope[-fade_len:] = np.linspace(1, 0, fade_len)
     result = pad * envelope
     return (result / (np.max(np.abs(result)) + 1e-8) * 0.45).astype(np.float32)
-    return result.astype(np.float32)
+
+
+# ── Alerts & Tonal Generators ─────────────────────────────────────────
+
+def _alarm_beep_digital(sr: int, duration: float = 3.0) -> np.ndarray:
+    """Classic digital watch/clock alarm beeping at 2800 Hz in pulses."""
+    samples = int(sr * duration)
+    out = np.zeros(samples, dtype=np.float32)
+    beep_len = int(sr * 0.12)
+    pause_len = int(sr * 0.08)
+    group_pause = int(sr * 0.45)
+    t = np.linspace(0, 0.12, beep_len, endpoint=False)
+    single_beep = (0.75 * np.sin(2 * np.pi * 2800 * t) + 0.25 * np.sin(2 * np.pi * 5600 * t)) * np.hanning(beep_len)
+
+    pos = 0
+    beep_in_group = 0
+    while pos + beep_len <= samples:
+        out[pos : pos + beep_len] += single_beep
+        beep_in_group += 1
+        if beep_in_group % 4 == 0:
+            pos += beep_len + group_pause
+        else:
+            pos += beep_len + pause_len
+    return out
+
+
+def _alarm_beep_fast(sr: int, duration: float = 2.0) -> np.ndarray:
+    """Rapid electronic alarm beep at 2500 Hz."""
+    samples = int(sr * duration)
+    out = np.zeros(samples, dtype=np.float32)
+    beep_len = int(sr * 0.09)
+    pause_len = int(sr * 0.06)
+    t = np.linspace(0, 0.09, beep_len, endpoint=False)
+    single_beep = (0.8 * np.sin(2 * np.pi * 2500 * t) + 0.2 * np.sin(2 * np.pi * 5000 * t)) * np.hanning(beep_len)
+
+    pos = 0
+    while pos + beep_len <= samples:
+        out[pos : pos + beep_len] += single_beep
+        pos += beep_len + pause_len
+    return out
+
+
+def _alarm_beep_single(sr: int, duration: float = 0.25) -> np.ndarray:
+    """A single clean electronic beep at 2600 Hz."""
+    samples = int(sr * duration)
+    t = np.linspace(0, duration, samples, endpoint=False)
+    beep = (0.8 * np.sin(2 * np.pi * 2600 * t) + 0.2 * np.sin(2 * np.pi * 5200 * t)) * np.hanning(samples)
+    return beep.astype(np.float32)
+
+
+def _alarm_clock_bell(sr: int, duration: float = 2.5) -> np.ndarray:
+    """Ringing twin-bell mechanical alarm clock (rapid hammer oscillation)."""
+    samples = int(sr * duration)
+    t = np.linspace(0, duration, samples, endpoint=False)
+    ring_carrier = 0.6 * np.sin(2 * np.pi * 1850 * t) + 0.4 * np.sin(2 * np.pi * 2400 * t)
+    hammer_mod = 0.5 + 0.5 * np.sin(2 * np.pi * 28 * t)  # 28 Hz strike rate
+    decay = np.exp(-t * 0.4)
+    out = ring_carrier * hammer_mod * decay
+    return (out / (np.max(np.abs(out)) + 1e-8) * 0.75).astype(np.float32)
+
+
+def _digital_timer_beep(sr: int, duration: float = 1.5) -> np.ndarray:
+    """Double-beep kitchen or electronic timer tone at 2000 Hz."""
+    samples = int(sr * duration)
+    out = np.zeros(samples, dtype=np.float32)
+    beep_len = int(sr * 0.15)
+    t = np.linspace(0, 0.15, beep_len, endpoint=False)
+    beep = np.sin(2 * np.pi * 2000 * t) * np.hanning(beep_len)
+
+    for offset in [0.0, 0.25, 0.8, 1.05]:
+        st = int(offset * sr)
+        if st + beep_len <= samples:
+            out[st : st + beep_len] += beep * 0.75
+    return out
+
+
+def _phone_ring_digital(sr: int, duration: float = 3.0) -> np.ndarray:
+    """Dual-tone phone ring (440 Hz + 480 Hz) with standard cadence."""
+    samples = int(sr * duration)
+    t = np.linspace(0, duration, samples, endpoint=False)
+    ring = 0.5 * np.sin(2 * np.pi * 440 * t) + 0.5 * np.sin(2 * np.pi * 480 * t)
+    # Cadence: 1.5s on, 1.5s off
+    gate = (np.sin(2 * np.pi * (1.0 / 3.0) * t) > 0).astype(np.float32)
+    fade = np.hanning(int(sr * 0.05))
+    out = ring * gate
+    return (out * 0.70).astype(np.float32)
+
+
+def _microwave_chime(sr: int, duration: float = 1.2) -> np.ndarray:
+    """Clean appliance microwave / elevator chime at 1500 Hz with harmonic decay."""
+    samples = int(sr * duration)
+    t = np.linspace(0, duration, samples, endpoint=False)
+    env = np.exp(-t * 4.5)
+    chime = (0.6 * np.sin(2 * np.pi * 1500 * t) + 0.3 * np.sin(2 * np.pi * 3000 * t)) * env
+    return (chime / (np.max(np.abs(chime)) + 1e-8) * 0.75).astype(np.float32)
+
+
+def _ui_beep_high(sr: int, duration: float = 0.3) -> np.ndarray:
+    """High subtle digital notification / click tone at 3200 Hz."""
+    samples = int(sr * duration)
+    t = np.linspace(0, duration, samples, endpoint=False)
+    env = np.exp(-t * 22.0)
+    out = np.sin(2 * np.pi * 3200 * t) * env
+    return (out * 0.70).astype(np.float32)
+
+
+# ── Foley & Physical Transients ───────────────────────────────────────
+
+def _door_knock_wood(sr: int, duration: float = 0.8) -> np.ndarray:
+    """Realistic wooden door double knock."""
+    samples = int(sr * duration)
+    out = np.zeros(samples, dtype=np.float32)
+    for knock_time in [0.05, 0.28]:
+        st = int(knock_time * sr)
+        n = int(0.18 * sr)
+        t = np.linspace(0, 0.18, n, endpoint=False)
+        decay = np.exp(-t * 35.0)
+        body = (0.5 * np.sin(2 * np.pi * 175 * t) + 0.3 * np.sin(2 * np.pi * 310 * t) + 0.2 * np.random.randn(n)) * decay
+        if st + n <= samples:
+            out[st : st + n] += body
+    return (out / (np.max(np.abs(out)) + 1e-8) * 0.80).astype(np.float32)
+
+
+def _switch_click(sr: int, duration: float = 0.2) -> np.ndarray:
+    """Sharp mechanical light switch or relay click."""
+    samples = int(sr * duration)
+    t = np.linspace(0, duration, samples, endpoint=False)
+    snap = np.exp(-t * 90.0) * (0.6 * np.sin(2 * np.pi * 3500 * t) + 0.4 * np.random.randn(samples))
+    return (snap / (np.max(np.abs(snap)) + 1e-8) * 0.75).astype(np.float32)
+
+
+def _clock_tick(sr: int, duration: float = 1.5) -> np.ndarray:
+    """Mechanical clock ticks (tick-tock cadence)."""
+    samples = int(sr * duration)
+    out = np.zeros(samples, dtype=np.float32)
+    for i, tick_time in enumerate([0.1, 0.85]):
+        st = int(tick_time * sr)
+        n = int(0.08 * sr)
+        t = np.linspace(0, 0.08, n, endpoint=False)
+        decay = np.exp(-t * 80.0)
+        freq = 2400 if i % 2 == 0 else 1900
+        tick = (0.7 * np.sin(2 * np.pi * freq * t) + 0.3 * np.random.randn(n)) * decay
+        if st + n <= samples:
+            out[st : st + n] += tick
+    return (out / (np.max(np.abs(out)) + 1e-8) * 0.70).astype(np.float32)
+
+
+def _footstep_floor(sr: int, duration: float = 0.5) -> np.ndarray:
+    """Subtle wooden floor footstep."""
+    samples = int(sr * duration)
+    t = np.linspace(0, duration, samples, endpoint=False)
+    decay = np.exp(-t * 22.0)
+    low_thump = 0.7 * np.sin(2 * np.pi * 95 * t) * np.exp(-t * 18.0)
+    creak = 0.3 * np.sin(2 * np.pi * 420 * t) * decay
+    out = (low_thump + creak)
+    return (out / (np.max(np.abs(out)) + 1e-8) * 0.65).astype(np.float32)
+
+
+def _keyboard_tap(sr: int, duration: float = 0.2) -> np.ndarray:
+    """Clean mechanical keyboard key tap."""
+    samples = int(sr * duration)
+    t = np.linspace(0, duration, samples, endpoint=False)
+    click = (0.5 * np.sin(2 * np.pi * 4200 * t) + 0.5 * np.random.randn(samples)) * np.exp(-t * 70.0)
+    return (click / (np.max(np.abs(click)) + 1e-8) * 0.70).astype(np.float32)
+
+
+def _glass_clink(sr: int, duration: float = 0.6) -> np.ndarray:
+    """High metallic/glass toast clink at 3100 Hz."""
+    samples = int(sr * duration)
+    t = np.linspace(0, duration, samples, endpoint=False)
+    clink = (0.6 * np.sin(2 * np.pi * 3100 * t) + 0.4 * np.sin(2 * np.pi * 4650 * t)) * np.exp(-t * 9.0)
+    return (clink / (np.max(np.abs(clink)) + 1e-8) * 0.70).astype(np.float32)

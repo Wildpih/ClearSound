@@ -17,10 +17,12 @@ from sklearn.metrics.pairwise import cosine_similarity
 
 from clearsound.config import Config
 from clearsound.core.audio_utils import (
+    compute_dominant_frequency,
     compute_mfcc,
     compute_spectral_envelope,
     load_audio,
 )
+from clearsound.core.donor_extractor import DonorSound
 from clearsound.core.gap_analyzer import GapInfo
 from clearsound.library.sound_library import SoundEntry, SoundLibrary
 
@@ -36,65 +38,55 @@ class MatchResult:
     category_match: bool             # does the category hint match?
     spectral_distance: float         # lower is better
     recommended_volume_db: float     # suggested volume adjustment
+    is_donor: bool = False           # was extracted from the audio track itself
 
 
 class SoundMatcher:
-    """Find sounds from the library that best match each gap's spectral
-    profile."""
+    """Find sounds from donors and library that best match each gap's acoustic profile."""
 
     def __init__(self, config: Config, library: SoundLibrary):
         self.config = config
         self.library = library
         self._feature_cache: Dict[str, np.ndarray] = {}
 
-    def find_matches(self, gaps: List[GapInfo]
-                     ) -> Dict[int, List[MatchResult]]:
-        """Find the best matching sounds for each gap.
+    def find_matches(
+        self,
+        gaps: List[GapInfo],
+        donors: Optional[List[DonorSound]] = None,
+    ) -> Dict[int, List[MatchResult]]:
+        """Find the best matching sounds for each gap, prioritizing clean track donors.
 
         Args:
             gaps: List of GapInfo from the analyzer.
+            donors: Optional list of clean sound donors extracted from the track.
 
         Returns:
-            Dictionary mapping gap index → sorted list of MatchResult
-            (best first).
+            Dictionary mapping gap index → sorted list of MatchResult (best first).
         """
-        console.print("\n[bold cyan]🔎 Ищем подходящие звуки в библиотеке...[/]")
+        console.print("\n[bold cyan]🔎 Ищем подходящие звуки (доноры из ролика + библиотека)...[/]")
 
-        # ── Pre-compute features for all library sounds ───────────────
-        all_sounds = self.library.list_all()
-        if not all_sounds:
-            console.print("[bold red]❌ Библиотека звуков пуста![/]")
-            console.print("  Добавьте .wav / .mp3 / .flac файлы в папку sounds/")
-            console.print("  Категории: ambient, music, nature, urban, foley")
+        all_sounds = list(self.library.list_all())
+        donor_entries = [d.to_sound_entry() for d in (donors or [])]
+        combined_sounds = donor_entries + all_sounds
+
+        if not combined_sounds:
+            console.print("[bold red]❌ Нет доступных звуков для восстановления![/]")
             return {i: [] for i in range(len(gaps))}
 
-        console.print(f"  Звуков в библиотеке: [bold]{len(all_sounds)}[/]")
+        console.print(f"  Кандидатов: [bold]{len(donor_entries)}[/] доноров из трека, [bold]{len(all_sounds)}[/] из библиотеки")
 
-        self._precompute_features(all_sounds)
+        # Cache features
+        self._precompute_features(combined_sounds)
 
-        # ── Match each gap ────────────────────────────────────────────
+        # Match each gap
         results: Dict[int, List[MatchResult]] = {}
 
-        with Progress(
-            TextColumn("[progress.description]{task.description}"),
-            BarColumn(),
-            TextColumn("[progress.percentage]{task.percentage:>3.0f}%"),
-            TimeRemainingColumn(),
-            console=console,
-        ) as progress:
-            task = progress.add_task("  Подбираем звуки...", total=len(gaps))
+        for i, gap in enumerate(gaps):
+            matches = self._match_gap(gap, combined_sounds, donors or [])
+            results[i] = matches[:self.config.top_matches]
 
-            for i, gap in enumerate(gaps):
-                matches = self._match_gap(gap, all_sounds)
-                results[i] = matches[:self.config.top_matches]
-                progress.advance(task)
-
-        # Summary
         matched_count = sum(1 for m in results.values() if m)
-        console.print(
-            f"[bold green]✓ Найдены совпадения для "
-            f"{matched_count}/{len(gaps)} сегментов[/]"
-        )
+        console.print(f"[bold green]✓ Найдены подходящие звуки для {matched_count}/{len(gaps)} сегментов[/]")
 
         return results
 
@@ -126,11 +118,16 @@ class SoundMatcher:
                 progress.advance(task)
 
     def _match_gap(
-        self, gap: GapInfo, sounds: List[SoundEntry]
+        self,
+        gap: GapInfo,
+        sounds: List[SoundEntry],
+        donors: List[DonorSound],
     ) -> List[MatchResult]:
-        """Score every library sound against a single gap and return
-        sorted matches."""
+        """Score donors and library sounds against a single gap, strictly honoring acoustic type."""
         candidates: List[MatchResult] = []
+
+        # Find donor object lookup
+        donor_by_path = {str(d.path): d for d in donors}
 
         for sound in sounds:
             key = str(sound.path)
@@ -138,59 +135,74 @@ class SoundMatcher:
                 continue
 
             lib_mfcc = self._feature_cache[key]
-
-            # ── Cosine similarity on MFCC vectors ─────────────────────
             gap_vec = gap.mfcc_profile.reshape(1, -1)
             lib_vec = lib_mfcc.reshape(1, -1)
 
-            # Ensure same dimensionality
             min_dim = min(gap_vec.shape[1], lib_vec.shape[1])
-            sim = float(
+            base_sim = float(
                 cosine_similarity(gap_vec[:, :min_dim], lib_vec[:, :min_dim])[0, 0]
             )
-            # Normalize to 0-1 (cosine sim is already -1 to 1)
-            sim = (sim + 1.0) / 2.0
+            sim = (base_sim + 1.0) / 2.0
 
-            # ── Category bonus ────────────────────────────────────────
-            cat_match = (
-                sound.category.lower() == gap.category_hint.lower()
-                if gap.category_hint and sound.category
-                else False
-            )
-            if cat_match:
-                sim = min(1.0, sim + 0.15)
+            is_donor = key in donor_by_path
+            donor_obj = donor_by_path.get(key)
+            name_lower = sound.name.lower()
+            cat_lower = sound.category.lower()
 
-            # ── Spectral distance (secondary) ─────────────────────────
-            try:
-                audio_lib, sr = load_audio(
-                    sound.path, sr=self.config.sample_rate, mono=True
-                )
-                _, lib_env = compute_spectral_envelope(audio_lib, sr)
-                if gap.spectral_envelope is not None:
-                    min_len = min(len(gap.spectral_envelope), len(lib_env))
-                    dist = float(np.mean(np.abs(
-                        gap.spectral_envelope[:min_len] - lib_env[:min_len]
-                    )))
-                else:
-                    dist = 1.0
-            except Exception:
-                dist = 1.0
+            # ── 1. Acoustic Type Rules & Penalties ────────────────────
+            # If gap is a tonal beep or alarm:
+            if gap.is_tonal or gap.event_type == "tonal_beep":
+                # If donor from track has matching frequency:
+                if is_donor and donor_obj and donor_obj.is_tonal:
+                    freq_ratio = min(gap.dominant_freq, donor_obj.dominant_freq) / max(gap.dominant_freq, donor_obj.dominant_freq, 1.0)
+                    if freq_ratio > 0.80:
+                        # Genuine match from the same audio track!
+                        sim = 0.90 + 0.09 * freq_ratio
+                    else:
+                        sim += 0.15
+                elif cat_lower == "alerts":
+                    # Library alert sound (alarm, beep, ring)
+                    sim += 0.25
+                elif cat_lower in ["ambient", "nature", "urban"] or any(w in name_lower for w in ["wind", "rain", "noise", "traffic", "city_hum"]):
+                    # NEVER insert continuous atmospheric noise into an alarm beep!
+                    sim = 0.02
 
-            # ── Recommended volume ────────────────────────────────────
+            # If gap is a transient foley (knock, click, tap):
+            elif gap.is_transient or gap.event_type == "transient_foley":
+                if is_donor and donor_obj and donor_obj.is_transient:
+                    sim = 0.92
+                elif cat_lower == "foley":
+                    sim += 0.20
+                elif cat_lower in ["ambient", "nature"] or any(w in name_lower for w in ["wind", "rain"]):
+                    # NEVER insert wind or rain into a knock or footstep!
+                    sim = 0.02
+
+            # If gap is short (< 0.8s):
+            if gap.duration_sec < 0.8:
+                if any(w in name_lower for w in ["wind", "rain", "white_noise", "pink_noise", "brown_noise"]):
+                    sim = 0.02
+
+            # Standard category bonus
+            cat_match = (cat_lower == gap.category_hint.lower())
+            if cat_match and sim > 0.1:
+                sim = min(1.0, sim + 0.10)
+
+            # Recommend volume
             rec_vol = self._recommend_volume(gap, sound)
 
-            if sim >= self.config.min_similarity:
+            if sim >= 0.20:
                 candidates.append(MatchResult(
                     sound=sound,
-                    similarity_score=sim,
+                    similarity_score=min(0.99, sim),
                     category_match=cat_match,
-                    spectral_distance=dist,
+                    spectral_distance=1.0 - sim,
                     recommended_volume_db=rec_vol,
+                    is_donor=is_donor,
                 ))
 
-        # Sort: similarity desc, then spectral distance asc
+        # Sort: donors and highest similarity first
         candidates.sort(
-            key=lambda m: (-m.similarity_score, m.spectral_distance)
+            key=lambda m: (-1 if m.is_donor else 0, -m.similarity_score)
         )
         return candidates
 

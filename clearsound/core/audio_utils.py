@@ -228,6 +228,58 @@ def compute_spectral_centroid(audio: np.ndarray, sr: int = 44100) -> np.ndarray:
     return librosa.feature.spectral_centroid(y=audio, sr=sr)[0]
 
 
+def compute_spectral_flatness(audio: np.ndarray, n_fft: int = 2048) -> float:
+    """Compute spectral flatness (Wiener entropy).
+
+    Values near 0 indicate strong tonality (beeps, bells, tones, musical notes).
+    Values near 1 indicate noise (wind, rain, broadband hiss).
+    """
+    if audio.ndim > 1:
+        audio = np.mean(audio, axis=0)
+    if len(audio) < 256:
+        return 1.0
+    n = min(n_fft, len(audio))
+    from scipy.fft import rfft
+    spec = np.abs(rfft(audio[:n])) ** 2 + 1e-12
+    geom_mean = np.exp(np.mean(np.log(spec)))
+    arith_mean = np.mean(spec)
+    return float(np.clip(geom_mean / (arith_mean + 1e-12), 0.0, 1.0))
+
+
+def compute_dominant_frequency(audio: np.ndarray, sr: int = 44100, min_freq: float = 200.0) -> Tuple[float, float]:
+    """Find dominant spectral peak frequency (Hz) and its prominence ratio over background.
+
+    Returns:
+        (dominant_freq_hz, peak_ratio)
+    """
+    if audio.ndim > 1:
+        audio = np.mean(audio, axis=0)
+    if len(audio) < 256:
+        return 0.0, 0.0
+    from scipy.fft import rfft, rfftfreq
+    spec = np.abs(rfft(audio))
+    freqs = rfftfreq(len(audio), 1.0 / sr)
+    valid = (freqs >= min_freq) & (freqs <= min(sr / 2.0, 12000.0))
+    if not np.any(valid):
+        return 0.0, 0.0
+    spec_v = spec[valid]
+    freqs_v = freqs[valid]
+    idx = np.argmax(spec_v)
+    peak_val = float(spec_v[idx])
+    mean_val = float(np.mean(spec_v)) + 1e-9
+    ratio = peak_val / mean_val
+    return float(freqs_v[idx]), ratio
+
+
+def compute_crest_factor(audio: np.ndarray) -> float:
+    """Compute peak-to-RMS crest factor to detect impulsive transients (clicks, knocks)."""
+    if audio.ndim > 1:
+        audio = np.mean(audio, axis=0)
+    rms = np.sqrt(np.mean(audio ** 2)) + 1e-9
+    peak = np.max(np.abs(audio))
+    return float(peak / rms)
+
+
 def amplitude_to_db(amplitude: float) -> float:
     """Convert amplitude to dB."""
     if amplitude <= 0:

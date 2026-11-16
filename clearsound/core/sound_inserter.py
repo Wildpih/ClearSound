@@ -13,6 +13,7 @@ from rich.progress import BarColumn, Progress, TextColumn
 
 from clearsound.config import Config
 from clearsound.core.audio_utils import (
+    apply_eq,
     apply_fade,
     compute_spectral_envelope,
     crossfade,
@@ -114,6 +115,20 @@ class SoundInserter:
             # ── Insert the patch into the result ──────────────────
             start = gap.start_sample
             end = gap.end_sample
+
+            # ── 1. Un-muffle suppression: boost muffled frequency band ───
+            if gap.is_tonal and gap.dominant_freq >= 200.0:
+                try:
+                    boost_db = min(9.0, max(3.0, gap.energy_loss_ratio * 12.0))
+                    if is_stereo:
+                        for ch in range(result.shape[0]):
+                            result[ch, start:end] = apply_eq(result[ch, start:end], sr, gap.dominant_freq, gain_db=boost_db, q=3.5)
+                    else:
+                        result[start:end] = apply_eq(result[start:end], sr, gap.dominant_freq, gain_db=boost_db, q=3.5)
+                except Exception:
+                    pass
+
+            # ── 2. Insert the patch into the result ───────────────────────
             patch_len = min(len(patch), end - start)
 
             if is_stereo:
@@ -142,11 +157,41 @@ class SoundInserter:
         sr: int,
         volume_db: float,
     ) -> np.ndarray:
-        """Prepare a sound patch from a path."""
+        """Prepare a sound patch from a path, preserving acoustic nature."""
         audio, _ = load_audio(sound_path, sr=sr, mono=True)
         target_len = gap.duration_samples
+        vol_factor = db_to_amplitude(volume_db)
 
-        # ── Time-stretch or loop to match gap length ──────────────────
+        # ── A. Tonal Sounds (Alarm Beeps, Rings, Chimes) ──────────────
+        if gap.is_tonal or gap.event_type == "tonal_beep":
+            # Never time-stretch a beep! It distorts pitch and creates robotic warble
+            if len(audio) > target_len:
+                patch = audio[:target_len] * vol_factor
+            else:
+                # If short single beep, place it cleanly or repeat with realistic pause
+                if len(audio) < int(0.3 * sr) and target_len >= 2 * len(audio):
+                    pause = np.zeros(int(0.08 * sr), dtype=np.float32)
+                    unit = np.concatenate([audio, pause])
+                    repeats = (target_len // len(unit)) + 1
+                    patch = np.tile(unit, repeats)[:target_len] * vol_factor
+                else:
+                    patch = np.zeros(target_len, dtype=np.float32)
+                    patch[:len(audio)] = audio * vol_factor
+
+            # Gentle 4ms anti-click fade
+            fade_samples = int(0.004 * sr)
+            return apply_fade(patch, fade_in_samples=fade_samples, fade_out_samples=fade_samples)
+
+        # ── B. Transient Foley (Knocks, Clicks, Steps) ────────────────
+        if gap.is_transient or gap.event_type == "transient_foley":
+            # Transients must keep sharp attack
+            patch = np.zeros(target_len, dtype=np.float32)
+            usable = min(len(audio), target_len)
+            patch[:usable] = audio[:usable] * vol_factor
+            fade_samples = int(0.003 * sr)
+            return apply_fade(patch, fade_in_samples=fade_samples, fade_out_samples=fade_samples)
+
+        # ── C. Continuous Ambient Noise (Room Tone, Wind, Rain) ───────
         if len(audio) < target_len:
             repeats = (target_len // len(audio)) + 1
             audio = np.tile(audio, repeats)
@@ -158,18 +203,16 @@ class SoundInserter:
             else:
                 audio = audio[:target_len]
 
-        # ── Volume adjustment ─────────────────────────────────────────
-        vol_factor = db_to_amplitude(volume_db)
         audio = audio * vol_factor
 
-        # ── Spectral shaping ──────────────────────────────────────────
+        # Spectral shaping for ambient background
         if self.config.apply_spectral_shaping and gap.spectral_envelope is not None:
             try:
                 audio = spectral_shape(audio, gap.spectral_envelope, sr)
             except Exception:
                 pass
 
-        # ── Match loudness to surrounding context ─────────────────────
+        # Match loudness to context
         context_samples = seconds_to_samples(1.0, sr)
         ctx_start = max(0, gap.start_sample - context_samples)
         ctx_end = min(len(mono_novoc), gap.end_sample + context_samples)
@@ -182,10 +225,8 @@ class SoundInserter:
             audio = match_loudness(audio, context)
             audio = audio * vol_factor
 
-        # ── Fade in/out ───────────────────────────────────────────────
         fade = seconds_to_samples(self.config.crossfade_duration, sr)
-        audio = apply_fade(audio, fade_in_samples=fade, fade_out_samples=fade)
-        return audio
+        return apply_fade(audio, fade_in_samples=fade, fade_out_samples=fade)
 
     def _prepare_patch(
         self,
