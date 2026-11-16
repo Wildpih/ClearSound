@@ -1,0 +1,24 @@
+# ClearSound - Audio Voice Removal & Restoration
+# Core audio processing
+demucs>=4.0.0
+librosa>=0.10.0
+soundfile>=0.12.0
+pydub>=0.25.0
+numpy>=1.24.0
+scipy>=1.10.0
+
+# Audio playback
+simpleaudio>=1.0.4
+
+# CLI interface
+rich>=13.0.0
+click>=8.1.0
+
+# Video processing
+ffmpeg-python>=0.2.0
+
+# Spectral analysis
+scikit-learn>=1.3.0
+
+# Optional: Freesound API
+requests>=2.31.0
