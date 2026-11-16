@@ -249,6 +249,8 @@ class MainWindow(QMainWindow):
         self.player_widget.device_changed.connect(
             lambda _: self.library_widget.set_audio_device(self.player_widget.audio_output.device())
         )
+        if self.player_widget.audio_output.device():
+            self.library_widget.set_audio_device(self.player_widget.audio_output.device())
 
         self._refresh_projects_combo()
 

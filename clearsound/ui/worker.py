@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import time
 from pathlib import Path
 from typing import Dict, List, Optional
 
@@ -90,10 +91,11 @@ class PipelineWorker(QThread):
 
             if is_video:
                 self.progress.emit("Подготовка видеопревью с новыми звуками...", 92)
-                preview_video_path = self.config.temp_dir / f"{self.input_path.stem}_preview_enhanced.mp4"
+                ts = int(time.time() * 1000)
+                preview_video_path = self.config.temp_dir / f"{self.input_path.stem}_preview_enhanced_{ts}.mp4"
                 combine_video_audio(self.input_path, enhanced_wav, preview_video_path)
 
-                preview_novocal_video_path = self.config.temp_dir / f"{self.input_path.stem}_preview_novocals.mp4"
+                preview_novocal_video_path = self.config.temp_dir / f"{self.input_path.stem}_preview_novocals_{ts}.mp4"
                 combine_video_audio(self.input_path, no_vocals_wav, preview_novocal_video_path)
 
             self.progress.emit("Готово!", 100)
@@ -170,7 +172,8 @@ class QuickReinsertWorker(QThread):
 
             preview_video_path: Optional[Path] = None
             if self.is_video:
-                preview_video_path = self.config.temp_dir / f"{self.input_path.stem}_preview_enhanced.mp4"
+                ts = int(time.time() * 1000)
+                preview_video_path = self.config.temp_dir / f"{self.input_path.stem}_preview_enhanced_{ts}.mp4"
                 combine_video_audio(self.input_path, enhanced_wav, preview_video_path)
 
             self.finished.emit({

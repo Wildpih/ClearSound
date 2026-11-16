@@ -47,6 +47,13 @@ class VideoPlayerWidget(QWidget):
         self.player.setAudioOutput(self.audio_output)
         self.audio_output.setVolume(1.0)
 
+        # Dedicated test player with its OWN independent audio output
+        # to ensure it NEVER steals or unbinds self.audio_output from self.player
+        self.test_audio_output = QAudioOutput(self)
+        self._test_sound_player = QMediaPlayer(self)
+        self._test_sound_player.setAudioOutput(self.test_audio_output)
+        self.test_audio_output.setVolume(1.0)
+
         # File paths for different tracks
         self.source_path: Optional[Path] = None
         self.is_video: bool = False
@@ -56,7 +63,7 @@ class VideoPlayerWidget(QWidget):
             "original": None,
         }
         self.current_mode: str = "enhanced"
-        self._test_sound_player: Optional[QMediaPlayer] = None
+        self._pending_resume_pos: Optional[int] = None
 
         self._setup_ui()
         self._init_audio_devices()
@@ -221,10 +228,10 @@ class VideoPlayerWidget(QWidget):
         self.btn_mute.setStyleSheet("font-size: 15px; padding: 6px;")
 
         self.slider_volume = QSlider(Qt.Horizontal)
-        self.slider_volume.setRange(0, 150)  # Up to 150% volume boost
+        self.slider_volume.setRange(0, 100)
         self.slider_volume.setValue(100)
         self.slider_volume.setFixedWidth(90)
-        self.slider_volume.setToolTip("Громкость воспроизведения (до 150%)")
+        self.slider_volume.setToolTip("Громкость воспроизведения (0–100%)")
 
         self.label_volume_pct = QLabel("100%")
         self.label_volume_pct.setStyleSheet("font-size: 11px; font-weight: bold; color: #cbd5e1; min-width: 38px;")
@@ -235,30 +242,50 @@ class VideoPlayerWidget(QWidget):
 
         main_layout.addWidget(ctrl_bar)
 
+    def _ensure_audio_output(self) -> None:
+        """Guarantee that self.player always has its audio output attached, configured, and unmuted."""
+        if self.player.audioOutput() != self.audio_output:
+            self.player.setAudioOutput(self.audio_output)
+        vol = min(1.0, max(0.0, self.slider_volume.value() / 100.0))
+        if not self.audio_output.isMuted():
+            self.audio_output.setVolume(vol)
+
     def _init_audio_devices(self) -> None:
-        """Populate the audio output device list."""
+        """Populate the audio output device list preserving any current user selection."""
+        current_dev = self.audio_output.device() if self.audio_output else None
+        current_id = current_dev.id() if current_dev else b""
+
         self.combo_audio_devices.blockSignals(True)
         self.combo_audio_devices.clear()
 
         devices = QMediaDevices.audioOutputs()
         default_dev = QMediaDevices.defaultAudioOutput()
         selected_idx = 0
+        found_current = False
 
         for i, dev in enumerate(devices):
             desc = dev.description()
-            icon_prefix = "🎧 " if any(w in desc.lower() for w in ["наушники", "headphone", "buds", "airpod", "headset"]) else "🔊 "
+            is_headphone = any(w in desc.lower() for w in ["наушники", "headphone", "buds", "airpod", "headset"])
+            icon_prefix = "🎧 " if is_headphone else "🔊 "
             is_def = (dev.id() == default_dev.id())
             label = f"{icon_prefix}{desc}" + (" (По умолчанию)" if is_def else "")
             self.combo_audio_devices.addItem(label, dev)
-            if is_def:
+
+            if current_id and dev.id() == current_id:
+                selected_idx = i
+                found_current = True
+            elif not found_current and is_def:
                 selected_idx = i
 
         self.combo_audio_devices.setCurrentIndex(selected_idx)
         self.combo_audio_devices.blockSignals(False)
 
-        # Set default device
+        # Apply device to both main and test audio outputs
         if devices:
-            self.audio_output.setDevice(devices[selected_idx])
+            target_dev = devices[selected_idx]
+            self.audio_output.setDevice(target_dev)
+            self.test_audio_output.setDevice(target_dev)
+            self._ensure_audio_output()
 
     def _connect_signals(self) -> None:
         self.btn_play.clicked.connect(self.toggle_play)
@@ -275,6 +302,8 @@ class VideoPlayerWidget(QWidget):
         self.player.positionChanged.connect(self._on_position_changed)
         self.player.durationChanged.connect(self._on_duration_changed)
         self.player.playbackStateChanged.connect(self._on_state_changed)
+        self.player.mediaStatusChanged.connect(self._on_media_status_changed)
+        self.player.errorOccurred.connect(self._on_player_error)
 
         # Slider interaction
         self.slider_time.sliderMoved.connect(self.set_position)
@@ -287,11 +316,14 @@ class VideoPlayerWidget(QWidget):
         dev = self.combo_audio_devices.itemData(idx)
         if isinstance(dev, QAudioDevice):
             self.audio_output.setDevice(dev)
+            self.test_audio_output.setDevice(dev)
+            self._ensure_audio_output()
             self.device_changed.emit(dev.description())
             self.lbl_audio_test_status.setText(f"Активно: {dev.description()[:25]}")
 
     def _on_test_audio_clicked(self) -> None:
-        """Generate and play a crisp, pleasant test chime to verify headphones audio."""
+        """Generate and play a crisp, pleasant test chime to verify headphones audio.
+        Uses its own dedicated test_audio_output so the main player is never disturbed."""
         sr = 44100
         duration = 0.5
         t = np.linspace(0, duration, int(sr * duration), endpoint=False)
@@ -303,14 +335,31 @@ class VideoPlayerWidget(QWidget):
         temp_test_wav = Path(tempfile.gettempdir()) / "clearsound_audio_test.wav"
         sf.write(str(temp_test_wav), signal, sr)
 
-        if self._test_sound_player is None:
-            self._test_sound_player = QMediaPlayer(self)
-        self._test_sound_player.setAudioOutput(self.audio_output)
+        # Route test player to the active audio device
+        self.test_audio_output.setDevice(self.audio_output.device())
+        self.test_audio_output.setVolume(self.audio_output.volume() or 1.0)
+        self.test_audio_output.setMuted(False)
+
         self._test_sound_player.setSource(QUrl.fromLocalFile(str(temp_test_wav)))
         self._test_sound_player.play()
 
+        # Re-ensure main player audio output is intact
+        self._ensure_audio_output()
+
         active_dev = self.audio_output.device().description()
         self.lbl_audio_test_status.setText(f"🔔 Звук отправлен на: {active_dev}!")
+
+    def _on_media_status_changed(self, status: QMediaPlayer.MediaStatus) -> None:
+        if status in (QMediaPlayer.MediaStatus.LoadedMedia, QMediaPlayer.MediaStatus.BufferedMedia):
+            self._ensure_audio_output()
+            if self._pending_resume_pos is not None and self._pending_resume_pos > 0:
+                pos = self._pending_resume_pos
+                self._pending_resume_pos = None
+                self.player.setPosition(pos)
+
+    def _on_player_error(self, error: QMediaPlayer.Error, error_string: str) -> None:
+        if error != QMediaPlayer.Error.NoError:
+            self.lbl_audio_test_status.setText(f"⚠️ Ошибка воспроизведения: {error_string}")
 
     # ── Source Setup ──────────────────────────────────────────────────
 
@@ -321,6 +370,7 @@ class VideoPlayerWidget(QWidget):
         no_vocals_path: Optional[Path] = None,
     ) -> None:
         """Load a media file into the player."""
+        self._ensure_audio_output()
         self.source_path = Path(source_path)
         video_exts = {".mp4", ".mkv", ".avi", ".mov", ".webm", ".flv", ".wmv"}
         self.is_video = self.source_path.suffix.lower() in video_exts
@@ -357,7 +407,19 @@ class VideoPlayerWidget(QWidget):
 
     def switch_track(self, mode: str, auto_play: bool = False, resume_pos: Optional[int] = None) -> None:
         """Switch audio track mode ('enhanced', 'no_vocals', 'original')."""
+        self._ensure_audio_output()
         self.current_mode = mode
+
+        # Synchronize UI radio buttons
+        self.btn_group.blockSignals(True)
+        if mode == "enhanced":
+            self.radio_enhanced.setChecked(True)
+        elif mode == "no_vocals":
+            self.radio_no_vocals.setChecked(True)
+        elif mode == "original":
+            self.radio_original.setChecked(True)
+        self.btn_group.blockSignals(False)
+
         target = self.track_sources.get(mode) or self.source_path
         if not target or not target.exists():
             return
@@ -365,9 +427,8 @@ class VideoPlayerWidget(QWidget):
         if resume_pos is None:
             resume_pos = self.player.position()
 
+        self._pending_resume_pos = resume_pos
         self.player.setSource(QUrl.fromLocalFile(str(target)))
-        if resume_pos > 0:
-            self.player.setPosition(resume_pos)
 
         if auto_play:
             self.player.play()
@@ -382,12 +443,14 @@ class VideoPlayerWidget(QWidget):
     # ── Playback Controls ─────────────────────────────────────────────
 
     def toggle_play(self) -> None:
+        self._ensure_audio_output()
         if self.player.playbackState() == QMediaPlayer.PlaybackState.PlayingState:
             self.player.pause()
         else:
             self.player.play()
 
     def play(self) -> None:
+        self._ensure_audio_output()
         self.player.play()
 
     def pause(self) -> None:
@@ -398,6 +461,7 @@ class VideoPlayerWidget(QWidget):
         self.set_position(new_pos)
 
     def set_position(self, pos_ms: int) -> None:
+        self._ensure_audio_output()
         self.player.setPosition(pos_ms)
 
     def _on_position_changed(self, pos: int) -> None:
@@ -431,16 +495,20 @@ class VideoPlayerWidget(QWidget):
         self.label_time.setText(f"{cur_str} / {tot_str}")
 
     def _on_volume_changed(self, val: int) -> None:
-        # val 0 to 150
+        # val 0 to 100
         vol = val / 100.0
-        self.audio_output.setVolume(min(1.0, vol))
+        self.audio_output.setVolume(vol)
+        self.test_audio_output.setVolume(vol)
         self.label_volume_pct.setText(f"{val}%")
         if val == 0:
             self.btn_mute.setText("🔇")
         else:
             self.btn_mute.setText("🔊")
+        self._ensure_audio_output()
 
     def _on_mute_clicked(self) -> None:
         is_muted = self.audio_output.isMuted()
-        self.audio_output.setMuted(not is_muted)
-        self.btn_mute.setText("🔇" if not is_muted else "🔊")
+        new_muted = not is_muted
+        self.audio_output.setMuted(new_muted)
+        self.test_audio_output.setMuted(new_muted)
+        self.btn_mute.setText("🔇" if new_muted else "🔊")
