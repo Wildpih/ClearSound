@@ -16,12 +16,6 @@ from clearsound.ui.theme import DARK_THEME_QSS
 
 def run_app(file_to_open: Optional[str] = None) -> int:
     """Launch the ClearSound graphical interface."""
-    # Ensure high DPI attributes before QApplication creation
-    if hasattr(Qt, "AA_EnableHighDpiScaling"):
-        QApplication.setAttribute(Qt.AA_EnableHighDpiScaling, True)
-    if hasattr(Qt, "AA_UseHighDpiPixmaps"):
-        QApplication.setAttribute(Qt.AA_UseHighDpiPixmaps, True)
-
     app = QApplication(sys.argv)
     app.setApplicationName("ClearSound")
     app.setOrganizationName("ClearSound")

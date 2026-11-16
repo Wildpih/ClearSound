@@ -123,9 +123,19 @@ class SoundLibrary:
     def _save_index(self) -> None:
         """Save the index to a JSON file."""
         data = [e.to_dict() for e in self._entries]
-        self._index_path.write_text(
-            json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8"
-        )
+        try:
+            self._index_path.write_text(
+                json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8"
+            )
+        except Exception:
+            try:
+                alt_path = self.config.temp_dir / self.INDEX_FILE
+                alt_path.write_text(
+                    json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8"
+                )
+                self._index_path = alt_path
+            except Exception:
+                pass
 
     def load_index(self) -> bool:
         """Load a previously saved index.
@@ -134,7 +144,11 @@ class SoundLibrary:
             True if index was loaded successfully.
         """
         if not self._index_path.exists():
-            return False
+            alt = self.config.temp_dir / self.INDEX_FILE
+            if alt.exists():
+                self._index_path = alt
+            else:
+                return False
         try:
             data = json.loads(self._index_path.read_text(encoding="utf-8"))
             self._entries = [SoundEntry.from_dict(d) for d in data]

@@ -14,12 +14,20 @@ if not exist "venv\Scripts\activate.bat" (
     exit /b 1
 )
 
-call venv\Scripts\activate.bat
+call "%~dp0venv\Scripts\activate.bat"
 
-REM Launch GUI (with or without drag-and-dropped file)
-if "%~1"=="" (
-    start "" python -m clearsound.ui.app
-) else (
-    start "" python -m clearsound.ui.app "%~1"
+echo.
+echo  ========================================================
+echo   Starting ClearSound GUI...
+echo  ========================================================
+echo.
+
+"%~dp0venv\Scripts\python.exe" -m clearsound.ui.app %*
+if errorlevel 1 (
+    echo.
+    echo ========================================================
+    echo  ClearSound exited with an error. See details above.
+    echo ========================================================
+    echo.
+    pause
 )
-exit /b 0

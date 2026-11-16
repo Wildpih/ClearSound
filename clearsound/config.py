@@ -59,17 +59,42 @@ class Config:
     freesound_api_key: Optional[str] = None
 
     def __post_init__(self):
+        import tempfile
+
         if self.sounds_dir is None:
             self.sounds_dir = self.project_root / "sounds"
         if self.output_dir is None:
             self.output_dir = self.project_root / "output"
         if self.temp_dir is None:
-            self.temp_dir = self.project_root / "temp"
+            local_temp = self.project_root / "temp"
+            try:
+                local_temp.mkdir(parents=True, exist_ok=True)
+                # verify writable
+                test_f = local_temp / ".write_test"
+                test_f.touch()
+                test_f.unlink()
+                self.temp_dir = local_temp
+            except Exception:
+                # Fallback to user AppData/Temp directory if root directory is restricted
+                fallback_temp = Path(tempfile.gettempdir()) / "ClearSound"
+                fallback_temp.mkdir(parents=True, exist_ok=True)
+                self.temp_dir = fallback_temp
 
         # Ensure directories exist
-        self.sounds_dir.mkdir(parents=True, exist_ok=True)
-        self.output_dir.mkdir(parents=True, exist_ok=True)
-        self.temp_dir.mkdir(parents=True, exist_ok=True)
+        try:
+            self.sounds_dir.mkdir(parents=True, exist_ok=True)
+        except Exception:
+            self.sounds_dir = Path(tempfile.gettempdir()) / "ClearSound" / "sounds"
+            self.sounds_dir.mkdir(parents=True, exist_ok=True)
+
+        try:
+            self.output_dir.mkdir(parents=True, exist_ok=True)
+        except Exception:
+            self.output_dir = Path.home() / "ClearSound_Output"
+            self.output_dir.mkdir(parents=True, exist_ok=True)
+
+        if not self.temp_dir.exists():
+            self.temp_dir.mkdir(parents=True, exist_ok=True)
 
         # Read API key from environment
         if self.freesound_api_key is None:
