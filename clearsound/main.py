@@ -177,11 +177,22 @@ def run_pipeline(
 
 # ── CLI Interface ─────────────────────────────────────────────────────
 
-@click.group()
+@click.group(invoke_without_command=True)
+@click.pass_context
 @click.version_option(__version__)
-def cli():
+def cli(ctx):
     """ClearSound — удаление голоса и восстановление звуковой дорожки."""
-    pass
+    if ctx.invoked_subcommand is None:
+        from clearsound.ui.app import run_app
+        run_app()
+
+
+@cli.command()
+@click.argument("input_file", type=click.Path(exists=True), required=False)
+def gui(input_file):
+    """Запустить графический интерфейс (UI)."""
+    from clearsound.ui.app import run_app
+    run_app(input_file)
 
 
 @cli.command()

@@ -7,8 +7,8 @@ pydub>=0.25.0
 numpy>=1.24.0
 scipy>=1.10.0
 
-# Audio playback
-simpleaudio>=1.0.4
+# GUI
+PySide6>=6.5.0
 
 # CLI interface
 rich>=13.0.0

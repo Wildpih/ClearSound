@@ -8,8 +8,9 @@ from __future__ import annotations
 
 import shutil
 import subprocess
+import sys
 from pathlib import Path
-from typing import Optional, Tuple
+from typing import Callable, Optional, Tuple
 
 import numpy as np
 from rich.console import Console
@@ -29,12 +30,18 @@ class VoiceRemover:
         self._separated_dir = config.temp_dir / "separated"
         self._separated_dir.mkdir(parents=True, exist_ok=True)
 
-    def separate(self, input_path: str | Path
-                 ) -> Tuple[np.ndarray, np.ndarray, int]:
+    def separate(
+        self,
+        input_path: str | Path,
+        callback: Optional[Callable[[str], None]] = None,
+        force: bool = False,
+    ) -> Tuple[np.ndarray, np.ndarray, int]:
         """Run full vocal separation.
 
         Args:
             input_path: Path to the audio file (WAV, MP3, FLAC, etc.).
+            callback: Optional status callback function.
+            force: If True, re-runs separation even if cached files exist.
 
         Returns:
             (no_vocals, vocals, sample_rate)
@@ -43,28 +50,50 @@ class VoiceRemover:
             - sample_rate: sample rate of the output.
         """
         input_path = Path(input_path)
-        console.print(f"\n[bold cyan]🎵 Разделяем аудио на стемы "
-                      f"(модель: {self.config.demucs_model})...[/]")
+        msg = f"Разделяем аудио на стемы (модель: {self.config.demucs_model})..."
+        console.print(f"\n[bold cyan]🎵 {msg}[/]")
+        if callback:
+            callback(msg)
 
         # ── Prepare a WAV for demucs if the input is a video ──────────
         from clearsound.core.audio_utils import extract_audio_from_video
         video_exts = {".mp4", ".mkv", ".avi", ".mov", ".webm", ".flv", ".wmv"}
         if input_path.suffix.lower() in video_exts:
             wav_path = self.config.temp_dir / (input_path.stem + "_extracted.wav")
-            if not wav_path.exists():
+            if not wav_path.exists() or force:
+                if callback:
+                    callback("Извлекаем аудиодорожку из видеофайла через FFmpeg...")
                 console.print("[dim]  Извлекаем аудио из видео...[/]")
                 extract_audio_from_video(input_path, wav_path, self.config.sample_rate)
             process_path = wav_path
         else:
             process_path = input_path
 
-        # ── Run Demucs ────────────────────────────────────────────────
+        # ── Output folder check ───────────────────────────────────────
         output_dir = self._separated_dir / "demucs_out"
-        if output_dir.exists():
-            shutil.rmtree(output_dir)
+        model_dir = output_dir / self.config.demucs_model / process_path.stem
+        cached_no_vocals = model_dir / "no_vocals.wav"
+        cached_vocals = model_dir / "vocals.wav"
+
+        # Check if already separated
+        if not force and cached_no_vocals.exists() and cached_vocals.exists():
+            msg_cached = "Найдено ранее разделенное аудио, загружаем из кэша..."
+            if callback:
+                callback(msg_cached)
+            console.print(f"[green]  {msg_cached}[/]")
+            no_vocals, sr = load_audio(cached_no_vocals, sr=self.config.sample_rate)
+            vocals, _ = load_audio(cached_vocals, sr=self.config.sample_rate)
+            return no_vocals, vocals, sr
+
+        # ── Run Demucs ────────────────────────────────────────────────
+        if output_dir.exists() and force:
+            shutil.rmtree(output_dir, ignore_errors=True)
+
+        if callback:
+            callback(f"Запуск нейросети Demucs ({self.config.demucs_model})... Это может занять некоторое время.")
 
         cmd = [
-            "python", "-m", "demucs",
+            sys.executable, "-m", "demucs",
             "--two-stems", "vocals",     # only separate vocals vs rest
             "-n", self.config.demucs_model,
             "-o", str(output_dir),

@@ -49,6 +49,74 @@ def extract_audio_from_video(video_path: str | Path, output_path: Optional[str |
     return output_path
 
 
+def combine_video_audio(video_path: str | Path, audio_path: str | Path,
+                        output_path: str | Path) -> Path:
+    """Remux a video with a new audio track using FFmpeg.
+
+    Copies the video stream without re-encoding (-c:v copy) for maximum
+    speed, and encodes the audio as high quality AAC.
+
+    Args:
+        video_path: Source video path.
+        audio_path: Source audio path (WAV/MP3/etc.).
+        output_path: Destination video path (.mp4, .mkv, etc.).
+
+    Returns:
+        Path to the remuxed video.
+    """
+    video_path = Path(video_path)
+    audio_path = Path(audio_path)
+    output_path = Path(output_path)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+
+    cmd = [
+        "ffmpeg", "-y",
+        "-i", str(video_path),
+        "-i", str(audio_path),
+        "-c:v", "copy",
+        "-c:a", "aac",
+        "-b:a", "256k",
+        "-map", "0:v:0",
+        "-map", "1:a:0",
+        "-shortest",
+        str(output_path),
+    ]
+    subprocess.run(cmd, check=True, capture_output=True)
+    return output_path
+
+
+def get_waveform_peaks(audio: np.ndarray, num_points: int = 1000) -> np.ndarray:
+    """Compute min/max peaks for waveform visualization.
+
+    Args:
+        audio: Audio array (mono or multi-channel).
+        num_points: Target resolution of peaks.
+
+    Returns:
+        Array of shape (num_points, 2) containing [min, max] per segment.
+    """
+    if audio.ndim > 1:
+        audio = np.mean(audio, axis=0)
+
+    total_samples = len(audio)
+    if total_samples == 0:
+        return np.zeros((num_points, 2), dtype=np.float32)
+
+    step = max(1, total_samples // num_points)
+    num_bins = min(num_points, total_samples // step)
+    peaks = np.zeros((num_bins, 2), dtype=np.float32)
+
+    for i in range(num_bins):
+        start = i * step
+        end = min(start + step, total_samples)
+        segment = audio[start:end]
+        if len(segment) > 0:
+            peaks[i, 0] = float(np.min(segment))
+            peaks[i, 1] = float(np.max(segment))
+
+    return peaks
+
+
 def load_audio(path: str | Path, sr: int = 44100, mono: bool = False
                ) -> Tuple[np.ndarray, int]:
     """Load an audio file.

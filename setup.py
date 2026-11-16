@@ -14,7 +14,7 @@ setup(
         "pydub>=0.25.0",
         "numpy>=1.24.0",
         "scipy>=1.10.0",
-        "simpleaudio>=1.0.4",
+        "PySide6>=6.5.0",
         "rich>=13.0.0",
         "click>=8.1.0",
         "ffmpeg-python>=0.2.0",
@@ -24,6 +24,7 @@ setup(
     entry_points={
         "console_scripts": [
             "clearsound=clearsound.main:cli",
+            "clearsound-gui=clearsound.ui.app:run_app",
         ],
     },
 )
