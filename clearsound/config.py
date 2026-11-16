@@ -15,6 +15,7 @@ class Config:
     sounds_dir: Path = field(default=None)
     output_dir: Path = field(default=None)
     temp_dir: Path = field(default=None)
+    projects_dir: Path = field(default=None)
 
     # ── Audio Processing ───────────────────────────────────────────────
     sample_rate: int = 44100
@@ -92,6 +93,14 @@ class Config:
         except Exception:
             self.output_dir = Path.home() / "ClearSound_Output"
             self.output_dir.mkdir(parents=True, exist_ok=True)
+
+        if self.projects_dir is None:
+            self.projects_dir = self.project_root / "projects"
+        try:
+            self.projects_dir.mkdir(parents=True, exist_ok=True)
+        except Exception:
+            self.projects_dir = Path(tempfile.gettempdir()) / "ClearSound" / "projects"
+            self.projects_dir.mkdir(parents=True, exist_ok=True)
 
         if not self.temp_dir.exists():
             self.temp_dir.mkdir(parents=True, exist_ok=True)
