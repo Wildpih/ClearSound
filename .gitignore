@@ -32,6 +32,7 @@ sounds/**/*.mp3
 sounds/**/*.flac
 !sounds/.gitkeep
 !sounds/*/.gitkeep
+sounds/library_index.json
 *.tmp
 *.bak
 models/

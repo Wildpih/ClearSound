@@ -3,10 +3,10 @@ chcp 65001 >nul 2>&1
 title ClearSound
 cd /d "%~dp0"
 
-if not exist "venv\Scripts\activate.bat" (
+if not exist "%~dp0venv\Scripts\activate.bat" (
     echo.
     echo ========================================================
-    echo  [ERROR] Virtual environment (venv) not found!
+    echo  [ERROR] Virtual environment not found!
     echo  Please run install.bat first to set up ClearSound.
     echo ========================================================
     echo.
@@ -17,9 +17,9 @@ if not exist "venv\Scripts\activate.bat" (
 call "%~dp0venv\Scripts\activate.bat"
 
 echo.
-echo  ========================================================
-echo   Starting ClearSound GUI...
-echo  ========================================================
+echo ========================================================
+echo  Starting ClearSound GUI...
+echo ========================================================
 echo.
 
 "%~dp0venv\Scripts\python.exe" -m clearsound.ui.app %*
