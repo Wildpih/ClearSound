@@ -264,12 +264,12 @@ class SoundLibrary:
 
         sounds_to_generate = [
             # (category, name, generator_func)
-            ("ambient", "white_noise_soft", lambda: _white_noise(sr, 5.0, 0.02)),
-            ("ambient", "pink_noise_soft", lambda: _pink_noise(sr, 5.0, 0.02)),
-            ("ambient", "brown_noise", lambda: _brown_noise(sr, 5.0, 0.03)),
+            ("ambient", "white_noise_soft", lambda: _white_noise(sr, 5.0, 0.35)),
+            ("ambient", "pink_noise_soft", lambda: _pink_noise(sr, 5.0, 0.40)),
+            ("ambient", "brown_noise", lambda: _brown_noise(sr, 5.0, 0.45)),
             ("ambient", "room_tone", lambda: _room_tone(sr, 5.0)),
-            ("nature", "wind_gentle", lambda: _wind_sound(sr, 5.0, 0.03)),
-            ("nature", "rain_light", lambda: _rain_sound(sr, 5.0, 0.04)),
+            ("nature", "wind_gentle", lambda: _wind_sound(sr, 5.0, 0.45)),
+            ("nature", "rain_light", lambda: _rain_sound(sr, 5.0, 0.50)),
             ("urban", "city_hum", lambda: _city_hum(sr, 5.0)),
             ("urban", "traffic_distant", lambda: _traffic_distant(sr, 5.0)),
             ("foley", "room_ambience", lambda: _room_ambience(sr, 5.0)),
@@ -282,8 +282,6 @@ class SoundLibrary:
             cat_dir = self.sounds_dir / category
             cat_dir.mkdir(parents=True, exist_ok=True)
             out_path = cat_dir / f"{name}.wav"
-            if out_path.exists():
-                continue
             try:
                 audio = gen_func()
                 sf.write(str(out_path), audio, sr)
@@ -300,12 +298,12 @@ class SoundLibrary:
 # ── Synthetic sound generators ────────────────────────────────────────
 # These produce simple audio arrays for the basic library.
 
-def _white_noise(sr: int, duration: float, amplitude: float) -> np.ndarray:
+def _white_noise(sr: int, duration: float, amplitude: float = 0.35) -> np.ndarray:
     samples = int(sr * duration)
-    return np.random.randn(samples).astype(np.float32) * amplitude
+    return (np.random.randn(samples).astype(np.float32) * amplitude)
 
 
-def _pink_noise(sr: int, duration: float, amplitude: float) -> np.ndarray:
+def _pink_noise(sr: int, duration: float, amplitude: float = 0.40) -> np.ndarray:
     """Generate pink noise (1/f) using the Voss-McCartney algorithm."""
     samples = int(sr * duration)
     n_rows = 16
@@ -320,29 +318,29 @@ def _pink_noise(sr: int, duration: float, amplitude: float) -> np.ndarray:
         array[i, cols[i]] = np.random.randn()
 
     result = np.nansum(array, axis=1)
-    result = result / np.max(np.abs(result)) * amplitude
+    result = result / (np.max(np.abs(result)) + 1e-8) * amplitude
     return result.astype(np.float32)
 
 
-def _brown_noise(sr: int, duration: float, amplitude: float) -> np.ndarray:
+def _brown_noise(sr: int, duration: float, amplitude: float = 0.45) -> np.ndarray:
     samples = int(sr * duration)
     white = np.random.randn(samples)
     brown = np.cumsum(white)
-    brown = brown / np.max(np.abs(brown)) * amplitude
+    brown = brown / (np.max(np.abs(brown)) + 1e-8) * amplitude
     return brown.astype(np.float32)
 
 
 def _room_tone(sr: int, duration: float) -> np.ndarray:
-    """Very low-level noise simulating room tone."""
+    """Low-level noise simulating room tone."""
     samples = int(sr * duration)
-    noise = np.random.randn(samples) * 0.005
-    # Low-pass filter
+    noise = np.random.randn(samples)
     from scipy.signal import butter, lfilter
     b, a = butter(4, 800 / (sr / 2), btype="low")
-    return lfilter(b, a, noise).astype(np.float32)
+    filtered = lfilter(b, a, noise)
+    return (filtered / (np.max(np.abs(filtered)) + 1e-8) * 0.35).astype(np.float32)
 
 
-def _wind_sound(sr: int, duration: float, amplitude: float) -> np.ndarray:
+def _wind_sound(sr: int, duration: float, amplitude: float = 0.45) -> np.ndarray:
     """Simulate gentle wind with filtered noise and amplitude modulation."""
     samples = int(sr * duration)
     noise = np.random.randn(samples)
@@ -351,50 +349,44 @@ def _wind_sound(sr: int, duration: float, amplitude: float) -> np.ndarray:
     b, a = butter(3, [100 / (sr / 2), 1500 / (sr / 2)], btype="band")
     filtered = lfilter(b, a, noise)
 
-    # Slow amplitude modulation
     t = np.linspace(0, duration, samples)
     mod = 0.5 + 0.5 * np.sin(2 * np.pi * 0.3 * t + np.random.uniform(0, 2 * np.pi))
-    result = filtered * mod * amplitude
-    return (result / np.max(np.abs(result)) * amplitude).astype(np.float32)
+    result = filtered * mod
+    return (result / (np.max(np.abs(result)) + 1e-8) * amplitude).astype(np.float32)
 
 
-def _rain_sound(sr: int, duration: float, amplitude: float) -> np.ndarray:
+def _rain_sound(sr: int, duration: float, amplitude: float = 0.50) -> np.ndarray:
     """Simulate light rain with filtered noise and random impacts."""
     samples = int(sr * duration)
-    # Continuous component
-    continuous = np.random.randn(samples) * 0.3
+    continuous = np.random.randn(samples) * 0.5
 
     from scipy.signal import butter, lfilter
     b, a = butter(2, [500 / (sr / 2), 5000 / (sr / 2)], btype="band")
     continuous = lfilter(b, a, continuous)
 
-    # Random droplet impacts
-    n_drops = int(duration * 20)
+    n_drops = int(duration * 25)
     for _ in range(n_drops):
         pos = np.random.randint(0, max(1, samples - 500))
         drop_len = np.random.randint(50, 500)
-        drop = np.random.randn(drop_len) * np.random.uniform(0.1, 0.5)
+        drop = np.random.randn(drop_len) * np.random.uniform(0.3, 0.8)
         drop *= np.exp(-np.linspace(0, 5, drop_len))
         end = min(pos + drop_len, samples)
         continuous[pos:end] += drop[: end - pos]
 
-    result = continuous * amplitude
-    return (result / np.max(np.abs(result)) * amplitude).astype(np.float32)
+    return (continuous / (np.max(np.abs(continuous)) + 1e-8) * amplitude).astype(np.float32)
 
 
 def _city_hum(sr: int, duration: float) -> np.ndarray:
-    """Low-frequency city background hum."""
+    """City background hum."""
     samples = int(sr * duration)
     t = np.linspace(0, duration, samples)
-    # Mix of low frequency tones
     hum = (
-        0.3 * np.sin(2 * np.pi * 50 * t)
-        + 0.2 * np.sin(2 * np.pi * 100 * t)
-        + 0.1 * np.sin(2 * np.pi * 120 * t)
-        + np.random.randn(samples) * 0.005
+        0.5 * np.sin(2 * np.pi * 60 * t)
+        + 0.3 * np.sin(2 * np.pi * 120 * t)
+        + 0.2 * np.sin(2 * np.pi * 180 * t)
+        + np.random.randn(samples) * 0.05
     )
-    result = hum * 0.015
-    return result.astype(np.float32)
+    return (hum / (np.max(np.abs(hum)) + 1e-8) * 0.40).astype(np.float32)
 
 
 def _traffic_distant(sr: int, duration: float) -> np.ndarray:
@@ -408,36 +400,36 @@ def _traffic_distant(sr: int, duration: float) -> np.ndarray:
 
     t = np.linspace(0, duration, samples)
     mod = 0.6 + 0.4 * np.sin(2 * np.pi * 0.15 * t)
-    result = filtered * mod * 0.02
-    return result.astype(np.float32)
+    result = filtered * mod
+    return (result / (np.max(np.abs(result)) + 1e-8) * 0.40).astype(np.float32)
 
 
 def _room_ambience(sr: int, duration: float) -> np.ndarray:
-    """Generic room ambience (very subtle noise)."""
+    """Generic room ambience."""
     samples = int(sr * duration)
-    noise = np.random.randn(samples) * 0.003
+    noise = np.random.randn(samples)
 
     from scipy.signal import butter, lfilter
     b, a = butter(2, 2000 / (sr / 2), btype="low")
-    return lfilter(b, a, noise).astype(np.float32)
+    filtered = lfilter(b, a, noise)
+    return (filtered / (np.max(np.abs(filtered)) + 1e-8) * 0.35).astype(np.float32)
 
 
 def _subtle_pad(sr: int, duration: float) -> np.ndarray:
-    """A subtle warm pad sound."""
+    """A warm pad sound."""
     samples = int(sr * duration)
     t = np.linspace(0, duration, samples)
     pad = (
-        0.3 * np.sin(2 * np.pi * 220 * t)
-        + 0.2 * np.sin(2 * np.pi * 330 * t)
-        + 0.1 * np.sin(2 * np.pi * 440 * t)
+        0.4 * np.sin(2 * np.pi * 220 * t)
+        + 0.3 * np.sin(2 * np.pi * 330 * t)
+        + 0.2 * np.sin(2 * np.pi * 440 * t)
     )
-    # Fade in/out
     envelope = np.ones(samples)
     fade_len = int(sr * 0.5)
     envelope[:fade_len] = np.linspace(0, 1, fade_len)
     envelope[-fade_len:] = np.linspace(1, 0, fade_len)
-    result = pad * envelope * 0.01
-    return result.astype(np.float32)
+    result = pad * envelope
+    return (result / (np.max(np.abs(result)) + 1e-8) * 0.45).astype(np.float32)
 
 
 def _drone_low(sr: int, duration: float) -> np.ndarray:
@@ -447,35 +439,32 @@ def _drone_low(sr: int, duration: float) -> np.ndarray:
     drone = (
         0.5 * np.sin(2 * np.pi * 65 * t)
         + 0.3 * np.sin(2 * np.pi * 130 * t + 0.5)
-        + 0.15 * np.sin(2 * np.pi * 195 * t + 1.0)
-        + np.random.randn(samples) * 0.01
+        + 0.2 * np.sin(2 * np.pi * 195 * t + 1.0)
     )
     envelope = np.ones(samples)
     fade_len = int(sr * 0.8)
     envelope[:fade_len] = np.linspace(0, 1, fade_len)
     envelope[-fade_len:] = np.linspace(1, 0, fade_len)
-    result = drone * envelope * 0.02
-    return result.astype(np.float32)
+    result = drone * envelope
+    return (result / (np.max(np.abs(result)) + 1e-8) * 0.45).astype(np.float32)
 
 
 def _pad_warm(sr: int, duration: float) -> np.ndarray:
     """A warm musical pad."""
     samples = int(sr * duration)
     t = np.linspace(0, duration, samples)
-    # C major chord
     pad = (
-        0.25 * np.sin(2 * np.pi * 261.63 * t)
-        + 0.20 * np.sin(2 * np.pi * 329.63 * t)
-        + 0.20 * np.sin(2 * np.pi * 392.00 * t)
-        + 0.10 * np.sin(2 * np.pi * 523.25 * t)
+        0.35 * np.sin(2 * np.pi * 261.63 * t)
+        + 0.30 * np.sin(2 * np.pi * 329.63 * t)
+        + 0.25 * np.sin(2 * np.pi * 392.00 * t)
+        + 0.15 * np.sin(2 * np.pi * 523.25 * t)
     )
-    # Slow vibrato
     vibrato = 1.0 + 0.01 * np.sin(2 * np.pi * 4 * t)
     pad = pad * vibrato
-    # Envelope
     envelope = np.ones(samples)
     fade_len = int(sr * 1.0)
     envelope[:fade_len] = np.linspace(0, 1, fade_len)
     envelope[-fade_len:] = np.linspace(1, 0, fade_len)
-    result = pad * envelope * 0.015
+    result = pad * envelope
+    return (result / (np.max(np.abs(result)) + 1e-8) * 0.45).astype(np.float32)
     return result.astype(np.float32)

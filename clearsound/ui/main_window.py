@@ -84,36 +84,55 @@ class MainWindow(QMainWindow):
 
         # ── Top Toolbar ───────────────────────────────────────────────
         toolbar_frame = QFrame()
-        toolbar_frame.setStyleSheet("background-color: #171b24; border: 1px solid #232c3c; border-radius: 8px; padding: 4px;")
+        toolbar_frame.setStyleSheet(
+            "background-color: #141822; border: 1px solid #283244; "
+            "border-radius: 8px; padding: 6px;"
+        )
         tool_layout = QHBoxLayout(toolbar_frame)
-        tool_layout.setContentsMargins(8, 4, 8, 4)
-        tool_layout.setSpacing(10)
+        tool_layout.setContentsMargins(10, 6, 10, 6)
+        tool_layout.setSpacing(12)
 
         # Logo / App title
         lbl_logo = QLabel("🎵 ClearSound")
-        lbl_logo.setStyleSheet("font-size: 16px; font-weight: bold; color: #00d2b4; margin-right: 12px;")
+        lbl_logo.setStyleSheet("font-size: 18px; font-weight: 800; color: #00e5c5; margin-right: 14px;")
         tool_layout.addWidget(lbl_logo)
 
-        self.btn_open = QPushButton("📂 Открыть файл...")
+        self.btn_open = QPushButton("📂 Открыть ролик / аудио")
+        self.btn_open.setStyleSheet(
+            "background-color: #212836; color: #ffffff; font-weight: 700; "
+            "border: 1px solid #3d4a61; border-radius: 6px; padding: 8px 18px; font-size: 13px;"
+        )
         self.btn_open.clicked.connect(self._on_open_file_clicked)
         tool_layout.addWidget(self.btn_open)
 
-        self.btn_process = QPushButton("⚡ Обработать")
+        self.btn_process = QPushButton("⚡ Запустить обработку")
         self.btn_process.setObjectName("primaryButton")
         self.btn_process.setToolTip("Запустить разделение голоса и интеллектуальное восстановление")
+        self.btn_process.setStyleSheet(
+            "background-color: #00d2b4; color: #071118; font-weight: 800; "
+            "border: 1px solid #00f0cf; border-radius: 6px; padding: 8px 24px; font-size: 13px;"
+        )
         self.btn_process.clicked.connect(self._on_process_clicked)
         self.btn_process.setEnabled(False)
         tool_layout.addWidget(self.btn_process)
 
         tool_layout.addStretch()
 
-        self.btn_export_audio = QPushButton("💾 Экспорт аудио...")
+        self.btn_export_audio = QPushButton("💾 Сохранить аудио")
+        self.btn_export_audio.setStyleSheet(
+            "background-color: #212836; color: #ffffff; font-weight: 700; "
+            "border: 1px solid #3d4a61; border-radius: 6px; padding: 8px 16px; font-size: 12px;"
+        )
         self.btn_export_audio.clicked.connect(self._on_export_audio_clicked)
         self.btn_export_audio.setEnabled(False)
         tool_layout.addWidget(self.btn_export_audio)
 
-        self.btn_export_video = QPushButton("🎬 Экспорт видео...")
+        self.btn_export_video = QPushButton("🎬 Сохранить видео")
         self.btn_export_video.setObjectName("accentButton")
+        self.btn_export_video.setStyleSheet(
+            "background-color: #8b5cf6; color: #ffffff; font-weight: 800; "
+            "border: 1px solid #a78bfa; border-radius: 6px; padding: 8px 20px; font-size: 13px;"
+        )
         self.btn_export_video.clicked.connect(self._on_export_video_clicked)
         self.btn_export_video.setEnabled(False)
         tool_layout.addWidget(self.btn_export_video)
@@ -192,6 +211,11 @@ class MainWindow(QMainWindow):
         self.segment_editor.seek_requested.connect(self.player_widget.set_position)
         self.segment_editor.apply_requested.connect(self._on_apply_adjustments)
         self.segment_editor.segment_changed.connect(self._on_segment_changed)
+
+        # Route audio device to library preview player
+        self.player_widget.device_changed.connect(
+            lambda _: self.library_widget.set_audio_device(self.player_widget.audio_output.device())
+        )
 
     def _create_settings_tab(self) -> QWidget:
         widget = QWidget()

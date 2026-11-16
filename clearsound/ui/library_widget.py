@@ -49,6 +49,11 @@ class LibraryWidget(QWidget):
         self._setup_ui()
         self.refresh_library()
 
+    def set_audio_device(self, device) -> None:
+        """Route library preview to the chosen audio output device."""
+        if device:
+            self.audio_output.setDevice(device)
+
     def _setup_ui(self) -> None:
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
@@ -155,6 +160,8 @@ class LibraryWidget(QWidget):
         self.table_sounds.setRowCount(len(sounds))
 
         for row, sound in enumerate(sounds):
+            self.table_sounds.setRowHeight(row, 40)
+
             # Name
             item_name = QTableWidgetItem(sound.name)
             item_name.setFlags(Qt.ItemIsEnabled | Qt.ItemIsSelectable)
@@ -180,7 +187,11 @@ class LibraryWidget(QWidget):
 
             # Play Button
             btn_play = QPushButton("▶ Слушать")
-            btn_play.setFixedWidth(85)
+            btn_play.setStyleSheet(
+                "background-color: #212836; color: #00f0cf; font-weight: bold; "
+                "border: 1px solid #00d2b4; border-radius: 4px; padding: 4px 12px; font-size: 11px;"
+            )
+            btn_play.setFixedWidth(95)
             btn_play.clicked.connect(lambda _, p=sound.path, n=sound.name: self._play_sound(p, n))
             self.table_sounds.setCellWidget(row, 4, btn_play)
 
