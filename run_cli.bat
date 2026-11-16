@@ -1,14 +1,12 @@
 @echo off
 chcp 65001 >nul 2>&1
-title ClearSound Console CLI
+title ClearSound CLI
 color 0B
-
 cd /d "%~dp0"
 
 if not exist "venv\Scripts\activate.bat" (
     echo.
-    echo  [ОШИБКА] Виртуальное окружение не найдено!
-    echo  Сначала запустите install.bat
+    echo [ERROR] Virtual environment not found! Run install.bat first.
     echo.
     pause
     exit /b 1
@@ -16,10 +14,9 @@ if not exist "venv\Scripts\activate.bat" (
 
 call venv\Scripts\activate.bat
 
-:: Если файл перетащен на .bat
 if not "%~1"=="" (
     echo.
-    echo  Обрабатываем: %~nx1
+    echo Processing: %~nx1
     echo.
     python -m clearsound.main process "%~1"
     echo.
@@ -30,19 +27,19 @@ if not "%~1"=="" (
 :menu
 cls
 echo.
-echo  ══════════════════════════════════════════════
-echo   ClearSound CLI — Меню командной строки
-echo  ══════════════════════════════════════════════
+echo ========================================================
+echo  ClearSound CLI - Console Menu
+echo ========================================================
 echo.
-echo   [1] Запустить графический интерфейс (UI)
-echo   [2] Обработать файл через консоль
-echo   [3] Только удалить голос
-echo   [4] Показать библиотеку звуков
-echo   [5] Сгенерировать базовые звуки
-echo   [6] Открыть папку output
-echo   [0] Выход
+echo   [1] Launch Graphical Interface (GUI)
+echo   [2] Process file in console (Full pipeline)
+echo   [3] Remove vocals only
+echo   [4] Sound library summary
+echo   [5] Generate basic sounds
+echo   [6] Open output folder
+echo   [0] Exit
 echo.
-set /p choice="  Выберите действие: "
+set /p choice="Select option (0-6): "
 
 if "%choice%"=="1" (
     start "" python -m clearsound.ui.app
@@ -59,10 +56,10 @@ goto menu
 :process
 cls
 echo.
-set /p inputfile="  Введите путь к файлу: "
+set /p inputfile="Enter file path: "
 set inputfile=%inputfile:"=%
 if not exist "%inputfile%" (
-    echo  Файл не найден!
+    echo File not found!
     pause
     goto menu
 )
@@ -73,10 +70,10 @@ goto menu
 :remove_only
 cls
 echo.
-set /p inputfile="  Введите путь к файлу: "
+set /p inputfile="Enter file path: "
 set inputfile=%inputfile:"=%
 if not exist "%inputfile%" (
-    echo  Файл не найден!
+    echo File not found!
     pause
     goto menu
 )
