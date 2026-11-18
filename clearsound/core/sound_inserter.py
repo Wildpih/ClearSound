@@ -106,13 +106,19 @@ class SoundInserter:
             sound_path: Optional[Path | str] = None
             is_manual_override = bool(sound_overrides and i in sound_overrides and sound_overrides[i])
             if is_manual_override:
+                override_val = str(sound_overrides[i])
+                if override_val == "__none__":
+                    continue
                 sound_path = sound_overrides[i]
             else:
+                # Speech dialogue gaps are preserved as clean background (no vocal)!
+                if gap.event_type == "speech_dialogue":
+                    continue
+
                 # Automatic insertion is ONLY performed for:
                 # - Tonal alerts (alarm beeps, timer rings, etc.)
-                # - Explicit transient foley / impacts
+                # - Explicit transient foley / impacts that were lost
                 # - Near-vacuum gaps (where vocal removal left dead silence < 0.005)
-                # Normal dialogue over healthy background music or room tone is LEFT CLEAN!
                 is_lost_event = (
                     gap.is_tonal
                     or gap.event_type in ["tonal_beep", "transient_foley", "explosive_blast", "transient_impact"]
@@ -153,16 +159,22 @@ class SoundInserter:
 
             if is_stereo:
                 for ch in range(result.shape[0]):
-                    result[ch, start:start + patch_len] += patch[:patch_len]
+                    seg = result[ch, start:start + patch_len] + patch[:patch_len]
+                    seg_max = np.max(np.abs(seg))
+                    if seg_max > 1.0:
+                        seg = seg * (0.98 / seg_max)
+                    result[ch, start:start + patch_len] = seg
             else:
-                result[start:start + patch_len] += patch[:patch_len]
+                seg = result[start:start + patch_len] + patch[:patch_len]
+                seg_max = np.max(np.abs(seg))
+                if seg_max > 1.0:
+                    seg = seg * (0.98 / seg_max)
+                result[start:start + patch_len] = seg
 
             inserted_count += 1
 
-        # ── Normalize only if actually clipping ───────────────────────
-        max_val = np.max(np.abs(result))
-        if max_val > 1.0:
-            result = result * (0.98 / max_val)
+        # ── Final safety clip without global attenuation ──────────────
+        np.clip(result, -1.0, 1.0, out=result)
 
         console.print(
             f"[bold green]✓ Вставлено звуков: {inserted_count}/{len(gaps)}[/]"

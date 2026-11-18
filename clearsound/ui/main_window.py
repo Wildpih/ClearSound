@@ -46,13 +46,13 @@ from clearsound.ui.worker import PipelineWorker, QuickReinsertWorker
 class MainWindow(QMainWindow):
     """ClearSound Graphical User Interface with Multi-Project Hub."""
 
-    def __init__(self, initial_file: Optional[str] = None):
+    def __init__(self, initial_file: Optional[str] = None, config: Optional[Config] = None):
         super().__init__()
         self.setWindowTitle(f"ClearSound v{__version__} — Удаление голоса и интеллектуальное восстановление звука")
         self.resize(1260, 880)
         self.setAcceptDrops(True)
 
-        self.config = Config()
+        self.config = config or Config()
         self.library = SoundLibrary(self.config)
         self.project_manager = ProjectManager(self.config)
 

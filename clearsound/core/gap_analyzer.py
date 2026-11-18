@@ -273,15 +273,24 @@ class GapAnalyzer:
         tonality = tonality_novoc if is_tonal_novoc else tonality_orig
 
         # True physical impact/explosion criteria:
-        # High impulse crest factor in original or background:
+        # A sharp impulse present in the original that was muffled/lost in the vocal-removed stem.
+        # Must have short duration (an impact or gunshot is an impulse <= 1.8s, never 5-10s speech dialogue)
         is_impact = bool(
             not is_tonal
-            and (
-                (max_crest >= 6.0 and orig_energy > 0.10)
-                or (max_crest >= 4.8 and dur_sec <= 2.2 and orig_energy > 0.12)
-            )
+            and dur_sec <= 1.8
+            and orig_energy > 0.12
+            and crest_orig >= 5.5
+            and crest_orig > crest_novoc * 1.3
+            and energy_loss > 0.60
         )
-        is_transient = bool(not is_tonal and not is_impact and max_crest > 3.2 and dur_sec <= 0.6)
+        is_transient = bool(
+            not is_tonal
+            and not is_impact
+            and dur_sec <= 0.6
+            and crest_orig >= 4.0
+            and crest_orig > crest_novoc * 1.3
+            and energy_loss > 0.60
+        )
 
         # Infer category and event type strictly based on acoustic properties
         if is_tonal:
@@ -290,7 +299,7 @@ class GapAnalyzer:
         elif is_impact:
             event_type = "explosive_blast" if dur_sec >= 0.8 else "transient_impact"
             category = "impacts"
-        elif is_transient or dur_sec < 0.6:
+        elif is_transient:
             event_type = "transient_foley"
             category = "foley"
         else:
