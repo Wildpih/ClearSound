@@ -16,6 +16,7 @@ CATEGORY_COLORS = {
     "alerts": QColor("#eab308"),
     "donor": QColor("#22c55e"),
     "impacts": QColor("#ef4444"),
+    "speech": QColor("#3b82f6"),
     "ambient": QColor("#00d2b4"),
     "nature": QColor("#10b981"),
     "music": QColor("#8b5cf6"),
@@ -158,7 +159,12 @@ class TimelineWidget(QWidget):
             end_x = self._ms_to_x(int(gap.end_sec * 1000))
             gap_w = max(4.0, end_x - start_x)
 
-            color = CATEGORY_COLORS.get(gap.category_hint.lower(), QColor("#00d2b4"))
+            cat_key = gap.category_hint.lower()
+            if gap.event_type == "speech_dialogue":
+                cat_key = "speech"
+            elif gap.is_tonal:
+                cat_key = "alerts"
+            color = CATEGORY_COLORS.get(cat_key, QColor("#00d2b4"))
             is_enabled = self.enabled_map.get(i, True)
             is_selected = (i == self.selected_gap_idx)
 

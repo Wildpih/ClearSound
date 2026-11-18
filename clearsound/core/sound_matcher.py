@@ -150,29 +150,36 @@ class SoundMatcher:
             cat_lower = sound.category.lower()
 
             # ── 1. Acoustic Type Rules & Penalties ────────────────────
+            # If gap is standard speech dialogue:
+            if gap.event_type == "speech_dialogue":
+                # Never insert beeps, alerts, gunshots, or clicks into normal speech!
+                if cat_lower in ["alerts", "impacts"] or (donor_obj and (donor_obj.is_tonal or donor_obj.is_transient)):
+                    sim = 0.01
+
             # If gap is a tonal beep or alarm:
-            if gap.is_tonal or gap.event_type == "tonal_beep":
+            elif gap.is_tonal or gap.event_type == "tonal_beep":
                 # If donor from track has matching frequency:
                 if is_donor and donor_obj and donor_obj.is_tonal:
                     freq_ratio = min(gap.dominant_freq, donor_obj.dominant_freq) / max(gap.dominant_freq, donor_obj.dominant_freq, 1.0)
-                    if freq_ratio > 0.80:
+                    if freq_ratio > 0.85:
                         # Genuine match from the same audio track!
-                        sim = 0.90 + 0.09 * freq_ratio
+                        sim = 0.98 + 0.01 * freq_ratio
                     else:
-                        sim += 0.15
+                        # Different frequency pitch — not a match!
+                        sim = 0.05
                 elif cat_lower == "alerts":
                     # Library alert sound (alarm, beep, ring)
-                    sim = 0.70 + 0.25 * sim
+                    sim = 0.60 + 0.25 * sim
                 else:
                     # NEVER insert non-alert sounds into an alarm beep!
                     sim = 0.02
 
             # If gap is an explosive blast or gunshot/impact:
             elif gap.event_type in ["explosive_blast", "transient_impact"] or gap.category_hint == "impacts":
-                if is_donor and donor_obj and (donor_obj.is_transient or donor_obj.crest_factor > 3.0):
-                    sim = 0.96
+                if is_donor and donor_obj and (donor_obj.is_transient or donor_obj.crest_factor > 3.5):
+                    sim = 0.92
                 elif cat_lower == "impacts":
-                    sim = 0.70 + 0.25 * sim
+                    sim = 0.75 + 0.20 * sim
                 else:
                     # NEVER insert alarm beeps, drones, or ambient noise into an explosion!
                     sim = 0.02
@@ -180,7 +187,7 @@ class SoundMatcher:
             # If gap is a transient foley (knock, click, tap):
             elif gap.is_transient or gap.event_type == "transient_foley":
                 if is_donor and donor_obj and donor_obj.is_transient:
-                    sim = 0.92
+                    sim = 0.90
                 elif cat_lower == "foley":
                     sim = 0.65 + 0.25 * sim
                 else:
@@ -209,9 +216,9 @@ class SoundMatcher:
                     is_donor=is_donor,
                 ))
 
-        # Sort: donors and highest similarity first
+        # Sort strictly by highest similarity score first
         candidates.sort(
-            key=lambda m: (-1 if m.is_donor else 0, -m.similarity_score)
+            key=lambda m: -m.similarity_score
         )
         return candidates
 

@@ -272,25 +272,30 @@ class GapAnalyzer:
         dom_freq = dom_freq_novoc if is_tonal_novoc else dom_freq_orig
         tonality = tonality_novoc if is_tonal_novoc else tonality_orig
 
-        is_transient = bool(max_crest > 3.0 and dur_sec <= 0.6)
-        is_impact = bool((max_crest >= 4.0 or (orig_energy > 0.15 and energy_loss > 0.25)) and not is_tonal)
+        # True physical impact/explosion criteria:
+        # High impulse crest factor in original or background:
+        is_impact = bool(
+            not is_tonal
+            and (
+                (max_crest >= 6.0 and orig_energy > 0.10)
+                or (max_crest >= 4.8 and dur_sec <= 2.2 and orig_energy > 0.12)
+            )
+        )
+        is_transient = bool(not is_tonal and not is_impact and max_crest > 3.2 and dur_sec <= 0.6)
 
         # Infer category and event type strictly based on acoustic properties
         if is_tonal:
             event_type = "tonal_beep"
             category = "alerts"
         elif is_impact:
-            event_type = "explosive_blast" if dur_sec >= 0.9 else "transient_impact"
+            event_type = "explosive_blast" if dur_sec >= 0.8 else "transient_impact"
             category = "impacts"
-        elif is_transient:
-            event_type = "transient_foley"
-            category = "foley"
-        elif dur_sec < 0.8:
-            # Short intervals are discrete foley/room sounds, never ambient wind or rain!
+        elif is_transient or dur_sec < 0.6:
             event_type = "transient_foley"
             category = "foley"
         else:
-            event_type = "ambient_diffuse"
+            # Standard speech dialogue where vocals were removed by Demucs
+            event_type = "speech_dialogue"
             category = self._infer_category(avg_centroid, avg_rms, sr)
 
         return GapInfo(
@@ -348,6 +353,8 @@ class GapAnalyzer:
                 sound_desc = "💥 Взрыв/Выстрел" if gap.event_type == "explosive_blast" else "💥 Удар/Импульс"
             elif gap.is_transient:
                 sound_desc = "🔨 Фоли/Шаг/Клик"
+            elif gap.event_type == "speech_dialogue":
+                sound_desc = "🗣️ Речь/Диалог"
             table.add_row(
                 str(i),
                 format_time(gap.start_sec),

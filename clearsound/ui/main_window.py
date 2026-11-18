@@ -174,6 +174,7 @@ class MainWindow(QMainWindow):
         # Tab 0: Project Hub
         self.hub_widget = ProjectHubWidget(self.project_manager)
         self.hub_widget.open_project_requested.connect(self.open_project)
+        self.hub_widget.project_deleted.connect(self._on_project_deleted)
         self.hub_widget.project_count_changed.connect(self._on_project_count_changed)
         self.tabs.addTab(self.hub_widget, "🗂️ Хаб проектов")
 
@@ -351,6 +352,22 @@ class MainWindow(QMainWindow):
             self.open_project(proj.id)
         except Exception as e:
             QMessageBox.critical(self, "Ошибка создания проекта", f"Не удалось создать проект:\n{e}")
+
+    def _on_project_deleted(self, project_id: str) -> None:
+        """Handle project deletion from hub."""
+        self._refresh_projects_combo()
+        if self.current_project and self.current_project.id == project_id:
+            self.player_widget.pause()
+            self.current_project = None
+            self.original_audio = None
+            self.no_vocals_audio = None
+            self.vocals_audio = None
+            self.enhanced_audio = None
+            self.timeline_widget.set_gaps([])
+            self.timeline_widget.set_waveform(None)
+            self.segment_editor.load_data([], {})
+            self.label_status.setText("Проект удалён. Выберите другой проект в хабе.")
+            self.tabs.setCurrentIndex(0)
 
     def open_project(self, project_id: str) -> None:
         """Switch to and open a project in the video player & editor."""

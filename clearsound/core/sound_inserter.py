@@ -84,13 +84,45 @@ class SoundInserter:
             if enabled_map is not None and not enabled_map.get(i, True):
                 continue
 
-            # Determine sound path to use
+            start = gap.start_sample
+            end = gap.end_sample
+            chunk_novoc = mono_novoc[start:end]
+            novoc_rms = float(np.sqrt(np.mean(chunk_novoc ** 2))) if len(chunk_novoc) > 0 else 0.0
+
+            # ── 1. Un-muffle suppression & Restoration ───────────────────
+            # If tonal (e.g. alarm beep, timer, phone ring), apply peaking EQ boost to restore muffled frequency:
+            if gap.is_tonal and gap.dominant_freq >= 300.0:
+                try:
+                    boost_db = min(9.0, max(3.0, gap.energy_loss_ratio * 12.0))
+                    if is_stereo:
+                        for ch in range(result.shape[0]):
+                            result[ch, start:end] = apply_eq(result[ch, start:end], sr, gap.dominant_freq, gain_db=boost_db, q=3.5)
+                    else:
+                        result[start:end] = apply_eq(result[start:end], sr, gap.dominant_freq, gain_db=boost_db, q=3.5)
+                except Exception:
+                    pass
+
+            # ── 2. Decide if sound patch insertion is needed ───────────────
             sound_path: Optional[Path | str] = None
-            if sound_overrides and i in sound_overrides and sound_overrides[i]:
+            is_manual_override = bool(sound_overrides and i in sound_overrides and sound_overrides[i])
+            if is_manual_override:
                 sound_path = sound_overrides[i]
             else:
+                # Automatic insertion is ONLY performed for:
+                # - Tonal alerts (alarm beeps, timer rings, etc.)
+                # - Explicit transient foley / impacts
+                # - Near-vacuum gaps (where vocal removal left dead silence < 0.005)
+                # Normal dialogue over healthy background music or room tone is LEFT CLEAN!
+                is_lost_event = (
+                    gap.is_tonal
+                    or gap.event_type in ["tonal_beep", "transient_foley", "explosive_blast", "transient_impact"]
+                    or (gap.energy_loss_ratio > 0.80 and novoc_rms < 0.005)
+                )
+                if not is_lost_event:
+                    continue
+
                 gap_matches = matches.get(i, [])
-                if gap_matches:
+                if gap_matches and gap_matches[0].similarity_score >= 0.70:
                     sound_path = gap_matches[0].sound.path
 
             if not sound_path:
@@ -116,51 +148,7 @@ class SoundInserter:
                 console.print(f"[dim red]  Пропускаем сегмент {i+1}: {e}[/]")
                 continue
 
-            # ── Insert the patch into the result ──────────────────
-            start = gap.start_sample
-            end = gap.end_sample
-
-            # ── 1. Un-muffle suppression & Restoration ───────────────────
-            # A. Tonal frequencies (beeps, alarms, rings)
-            if gap.is_tonal and gap.dominant_freq >= 200.0:
-                try:
-                    boost_db = min(9.0, max(3.0, gap.energy_loss_ratio * 12.0))
-                    if is_stereo:
-                        for ch in range(result.shape[0]):
-                            result[ch, start:end] = apply_eq(result[ch, start:end], sr, gap.dominant_freq, gain_db=boost_db, q=3.5)
-                    else:
-                        result[start:end] = apply_eq(result[start:end], sr, gap.dominant_freq, gain_db=boost_db, q=3.5)
-                except Exception:
-                    pass
-
-            # B. HPSS Transient De-bleeding from vocal stem:
-            # Reclaim sharp explosive cracks, gunshots, impacts that Demucs leaked into vocals
-            if vocals is not None:
-                try:
-                    voc_chunk = vocals[:, start:end] if is_stereo else vocals[start:end]
-                    transient_crack = extract_percussive_transient(voc_chunk, sr=sr)
-                    if is_stereo:
-                        for ch in range(result.shape[0]):
-                            result[ch, start:end] += transient_crack[ch] * 0.85
-                    else:
-                        result[start:end] += transient_crack * 0.85
-                except Exception:
-                    pass
-
-            # C. Harmonic Exciter for muffled one-off sounds (explosions, gunshots, impacts):
-            # Synthesize natural upper harmonics (3-14 kHz) to eliminate the muffled/underwater effect
-            if gap.event_type in ["explosive_blast", "transient_impact"] or gap.category_hint == "impacts" or (gap.energy_loss_ratio > 0.35 and not gap.is_tonal):
-                try:
-                    chunk = result[:, start:end] if is_stereo else result[start:end]
-                    excited = apply_harmonic_exciter(chunk, sr=sr, cutoff_freq=2600.0, drive=2.5, mix=0.35)
-                    if is_stereo:
-                        result[:, start:end] = excited
-                    else:
-                        result[start:end] = excited
-                except Exception:
-                    pass
-
-            # ── 2. Insert the patch into the result ───────────────────────
+            # ── 3. Insert the patch into the result ───────────────────────
             patch_len = min(len(patch), end - start)
 
             if is_stereo:
@@ -171,10 +159,10 @@ class SoundInserter:
 
             inserted_count += 1
 
-        # ── Normalize to prevent clipping ─────────────────────────────
+        # ── Normalize only if actually clipping ───────────────────────
         max_val = np.max(np.abs(result))
-        if max_val > 0.99:
-            result = result * (0.95 / max_val)
+        if max_val > 1.0:
+            result = result * (0.98 / max_val)
 
         console.print(
             f"[bold green]✓ Вставлено звуков: {inserted_count}/{len(gaps)}[/]"

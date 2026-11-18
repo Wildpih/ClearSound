@@ -289,6 +289,8 @@ class ProjectManager:
         projects.sort(key=lambda p: p.updated_at, reverse=True)
         return projects
 
+    get_project = load_project  # convenient alias
+
     def delete_project(self, project_id: str) -> bool:
         """Delete a project and all its cached files."""
         proj_folder = self.projects_dir / project_id

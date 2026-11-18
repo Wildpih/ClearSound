@@ -145,6 +145,7 @@ class ProjectHubWidget(QWidget):
     """Central Hub widget displaying all active and saved projects."""
 
     open_project_requested = Signal(str)  # project_id
+    project_deleted = Signal(str)         # project_id
     project_count_changed = Signal(int)
 
     def __init__(self, project_manager: ProjectManager, parent: Optional[QWidget] = None):
@@ -298,7 +299,7 @@ class ProjectHubWidget(QWidget):
         self.open_project_requested.emit(project_id)
 
     def _on_delete_project(self, project_id: str) -> None:
-        proj = self.pm.get_project(project_id)
+        proj = self.pm.load_project(project_id)
         name = proj.name if proj else project_id
         reply = QMessageBox.question(
             self, "Удаление проекта",
@@ -308,9 +309,10 @@ class ProjectHubWidget(QWidget):
         if reply == QMessageBox.Yes:
             self.pm.delete_project(project_id)
             self.refresh_hub()
+            self.project_deleted.emit(project_id)
 
     def _on_rename_project(self, project_id: str) -> None:
-        proj = self.pm.get_project(project_id)
+        proj = self.pm.load_project(project_id)
         if not proj:
             return
         new_name, ok = QInputDialog.getText(

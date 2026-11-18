@@ -32,6 +32,7 @@ CATEGORY_BADGES = {
     "alerts": ("⏰ Alerts", "background-color: #3f2504; color: #facc15; border: 1px solid #eab308; font-weight: bold; border-radius: 4px; padding: 2px 6px;"),
     "donor": ("🎯 Donor", "background-color: #052e16; color: #4ade80; border: 1px solid #22c55e; font-weight: bold; border-radius: 4px; padding: 2px 6px;"),
     "impacts": ("💥 Impacts", "background-color: #450a0a; color: #f87171; border: 1px solid #ef4444; font-weight: bold; border-radius: 4px; padding: 2px 6px;"),
+    "speech": ("🗣️ Речь", "background-color: #172554; color: #60a5fa; border: 1px solid #3b82f6; font-weight: bold; border-radius: 4px; padding: 2px 6px;"),
     "ambient": ("🌊 Ambient", "background-color: #0b2d2a; color: #00f0cf; border: 1px solid #00d2b4; font-weight: bold; border-radius: 4px; padding: 2px 6px;"),
     "nature": ("🍃 Nature", "background-color: #0e3020; color: #34d399; border: 1px solid #10b981; font-weight: bold; border-radius: 4px; padding: 2px 6px;"),
     "music": ("🎵 Music", "background-color: #261942; color: #c4b5fd; border: 1px solid #8b5cf6; font-weight: bold; border-radius: 4px; padding: 2px 6px;"),
@@ -176,6 +177,10 @@ class SegmentEditorWidget(QWidget):
 
             # Column 2: Category badge
             cat_name = gap.category_hint.lower()
+            if gap.event_type == "speech_dialogue":
+                cat_name = "speech"
+            elif gap.is_tonal:
+                cat_name = "alerts"
             badge_text, badge_style = CATEGORY_BADGES.get(cat_name, (gap.category_hint, "color: #ffffff;"))
             lbl_cat = QLabel(badge_text)
             lbl_cat.setStyleSheet(badge_style)
@@ -193,6 +198,9 @@ class SegmentEditorWidget(QWidget):
                 "border: 1px solid #3d4d68; border-radius: 6px; padding: 4px 8px;"
             )
             gap_matches = self.matches.get(i, [])
+
+            # Default option: Clean background without extra sound overlay
+            combo_sound.addItem("🔇 Чистый фон (без звука)", "__none__")
 
             # Add match recommendations
             for match in gap_matches:
@@ -215,7 +223,7 @@ class SegmentEditorWidget(QWidget):
             combo_sound.insertSeparator(combo_sound.count())
             combo_sound.addItem("➕ Выбрать другой аудиофайл...", "__browse__")
 
-            # Set current selection if override exists
+            # Set current selection
             if i in self.sound_overrides:
                 cur_path = str(self.sound_overrides[i])
                 idx = combo_sound.findData(cur_path)
@@ -224,6 +232,13 @@ class SegmentEditorWidget(QWidget):
                 else:
                     combo_sound.insertItem(0, f"📄 {Path(cur_path).name}", cur_path)
                     combo_sound.setCurrentIndex(0)
+            elif gap.is_tonal or gap.category_hint == "impacts" or gap.is_transient:
+                # For genuine lost sound events, select top match if available
+                if gap_matches and combo_sound.count() > 1:
+                    combo_sound.setCurrentIndex(1)
+            else:
+                # For normal speech dialogue, default to clean background
+                combo_sound.setCurrentIndex(0)
 
             combo_sound.currentIndexChanged.connect(
                 lambda idx, row=i, cb=combo_sound: self._on_sound_combo_changed(row, cb)
