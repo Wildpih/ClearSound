@@ -83,7 +83,7 @@ class PipelineWorker(QThread):
             # ── Step 4: Sound Insertion & Muffle Boost ────────────────
             self.progress.emit("Восстановление звучания и вставка звуков...", 85)
             inserter = SoundInserter(self.config)
-            enhanced = inserter.insert(no_vocals, gaps, matches, sr, vocals=vocals)
+            enhanced = inserter.insert(no_vocals, gaps, matches, sr, vocals=vocals, original=original)
 
             enhanced_wav = self.config.temp_dir / f"{self.input_path.stem}_enhanced.wav"
             save_audio(enhanced, enhanced_wav, sr)
@@ -147,6 +147,7 @@ class QuickReinsertWorker(QThread):
         enabled_map: Dict[int, bool],
         is_video: bool,
         vocals: Optional[np.ndarray] = None,
+        original: Optional[np.ndarray] = None,
         parent: Optional[QObject] = None,
     ):
         super().__init__(parent)
@@ -161,6 +162,7 @@ class QuickReinsertWorker(QThread):
         self.enabled_map = enabled_map
         self.is_video = is_video
         self.vocals = vocals
+        self.original = original
 
     def run(self) -> None:
         try:
@@ -174,6 +176,7 @@ class QuickReinsertWorker(QThread):
                 sound_overrides=self.sound_overrides,
                 enabled_map=self.enabled_map,
                 vocals=self.vocals,
+                original=self.original,
             )
 
             enhanced_wav = self.config.temp_dir / f"{self.input_path.stem}_enhanced.wav"

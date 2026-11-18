@@ -581,6 +581,7 @@ class MainWindow(QMainWindow):
             enabled_map=self.segment_editor.enabled_map,
             is_video=self.current_project.is_video,
             vocals=getattr(self, "vocals_audio", None),
+            original=getattr(self, "original_audio", None),
         )
         self.reinsert_worker.finished.connect(self._on_reinsert_finished)
         self.reinsert_worker.error.connect(self._on_reinsert_error)

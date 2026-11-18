@@ -33,6 +33,8 @@ CATEGORY_BADGES = {
     "donor": ("🎯 Donor", "background-color: #052e16; color: #4ade80; border: 1px solid #22c55e; font-weight: bold; border-radius: 4px; padding: 2px 6px;"),
     "impacts": ("💥 Impacts", "background-color: #450a0a; color: #f87171; border: 1px solid #ef4444; font-weight: bold; border-radius: 4px; padding: 2px 6px;"),
     "speech": ("🗣️ Речь", "background-color: #172554; color: #60a5fa; border: 1px solid #3b82f6; font-weight: bold; border-radius: 4px; padding: 2px 6px;"),
+    "camera_clicks": ("📷 Затвор", "background-color: #2e1065; color: #d8b4fe; border: 1px solid #a855f7; font-weight: bold; border-radius: 4px; padding: 2px 6px;"),
+    "gunshots_combat": ("💥 Выстрел", "background-color: #450a0a; color: #fca5a5; border: 1px solid #ef4444; font-weight: bold; border-radius: 4px; padding: 2px 6px;"),
     "ambient": ("🌊 Ambient", "background-color: #0b2d2a; color: #00f0cf; border: 1px solid #00d2b4; font-weight: bold; border-radius: 4px; padding: 2px 6px;"),
     "nature": ("🍃 Nature", "background-color: #0e3020; color: #34d399; border: 1px solid #10b981; font-weight: bold; border-radius: 4px; padding: 2px 6px;"),
     "music": ("🎵 Music", "background-color: #261942; color: #c4b5fd; border: 1px solid #8b5cf6; font-weight: bold; border-radius: 4px; padding: 2px 6px;"),
@@ -176,11 +178,14 @@ class SegmentEditorWidget(QWidget):
             self.table.setItem(i, 1, item_time)
 
             # Column 2: Category badge
-            cat_name = gap.category_hint.lower()
-            if gap.event_type == "speech_dialogue":
+            if gap.event_type in CATEGORY_BADGES:
+                cat_name = gap.event_type
+            elif gap.event_type == "speech_dialogue":
                 cat_name = "speech"
             elif gap.is_tonal:
                 cat_name = "alerts"
+            else:
+                cat_name = gap.category_hint.lower()
             badge_text, badge_style = CATEGORY_BADGES.get(cat_name, (gap.category_hint, "color: #ffffff;"))
             lbl_cat = QLabel(badge_text)
             lbl_cat.setStyleSheet(badge_style)
@@ -198,9 +203,16 @@ class SegmentEditorWidget(QWidget):
                 "border: 1px solid #3d4d68; border-radius: 6px; padding: 4px 8px;"
             )
             gap_matches = self.matches.get(i, [])
+            is_sfx_event = gap.event_type in ["camera_clicks", "gunshots_combat", "transient_impact", "transient_foley"]
 
-            # Default option: Clean background without extra sound overlay
-            combo_sound.addItem("🔇 Чистый фон (без звука)", "__none__")
+            # Option 0: For non-vocal sound events that Demucs suppressed, default is restoring the original authentic sound
+            if is_sfx_event:
+                combo_sound.addItem("🎯 Восстановлен оригинальный звук [100%]", "__restore_orig__")
+                combo_sound.addItem("🔇 Чистый фон (без звука)", "__none__")
+            else:
+                combo_sound.addItem("🔇 Чистый фон (без звука)", "__none__")
+                if gap.is_tonal:
+                    combo_sound.addItem("🎯 Восстановленный писк (EQ Boost)", "__restore_orig__")
 
             # Add match recommendations
             for match in gap_matches:
@@ -232,13 +244,15 @@ class SegmentEditorWidget(QWidget):
                 else:
                     combo_sound.insertItem(0, f"📄 {Path(cur_path).name}", cur_path)
                     combo_sound.setCurrentIndex(0)
-            elif gap.is_tonal or gap.category_hint == "impacts" or gap.is_transient:
-                # For genuine lost sound events, select top match if available
-                if gap_matches and combo_sound.count() > 1:
-                    combo_sound.setCurrentIndex(1)
+            elif is_sfx_event:
+                idx = combo_sound.findData("__restore_orig__")
+                combo_sound.setCurrentIndex(idx if idx >= 0 else 0)
+            elif gap.is_tonal:
+                idx = combo_sound.findData("__restore_orig__")
+                combo_sound.setCurrentIndex(idx if idx >= 0 else 0)
             else:
-                # For normal speech dialogue, default to clean background
-                combo_sound.setCurrentIndex(0)
+                idx = combo_sound.findData("__none__")
+                combo_sound.setCurrentIndex(idx if idx >= 0 else 0)
 
             combo_sound.currentIndexChanged.connect(
                 lambda idx, row=i, cb=combo_sound: self._on_sound_combo_changed(row, cb)
@@ -345,7 +359,10 @@ class SegmentEditorWidget(QWidget):
                 combo.setCurrentIndex(0)
                 return
         elif data:
-            self.sound_overrides[row] = Path(data)
+            if data in ["__restore_orig__", "__none__"]:
+                self.sound_overrides[row] = data
+            else:
+                self.sound_overrides[row] = Path(data)
 
         self.segment_changed.emit(row)
 

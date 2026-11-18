@@ -9,12 +9,13 @@ profile of each gap for later matching.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import List, Tuple
+from typing import List, Optional, Tuple
 
 import librosa
 import numpy as np
 from rich.console import Console
 from rich.table import Table
+from scipy.signal import fftconvolve
 
 from clearsound.config import Config
 from clearsound.core.audio_utils import (
@@ -61,6 +62,7 @@ class GapInfo:
     tonality: float = 0.0
     is_tonal: bool = False
     is_transient: bool = False
+    voiced_pitch: float = 0.0
     event_type: str = "ambient_diffuse"  # "tonal_beep", "transient_foley", "harmonic_music", "ambient_diffuse"
 
     @property
@@ -128,7 +130,7 @@ class GapAnalyzer:
         gaps: List[GapInfo] = []
         for start, end in merged:
             gap = self._characterize_gap(
-                start, end, orig_mono, novoc_mono, sr
+                start, end, orig_mono, novoc_mono, sr, voc_mono=voc_mono
             )
             if gap is not None:
                 gaps.append(gap)
@@ -220,6 +222,7 @@ class GapAnalyzer:
         orig_mono: np.ndarray,
         novoc_mono: np.ndarray,
         sr: int,
+        voc_mono: Optional[np.ndarray] = None,
     ) -> GapInfo | None:
         """Compute the spectral fingerprint and energy profile for a gap."""
 
@@ -272,40 +275,52 @@ class GapAnalyzer:
         dom_freq = dom_freq_novoc if is_tonal_novoc else dom_freq_orig
         tonality = tonality_novoc if is_tonal_novoc else tonality_orig
 
-        # True physical impact/explosion criteria:
-        # A sharp impulse present in the original that was muffled/lost in the vocal-removed stem.
-        # Must have short duration (an impact or gunshot is an impulse <= 1.8s, never 5-10s speech dialogue)
-        is_impact = bool(
-            not is_tonal
-            and dur_sec <= 1.8
-            and orig_energy > 0.12
-            and crest_orig >= 5.5
-            and crest_orig > crest_novoc * 1.3
-            and energy_loss > 0.60
-        )
-        is_transient = bool(
-            not is_tonal
-            and not is_impact
-            and dur_sec <= 0.6
-            and crest_orig >= 4.0
-            and crest_orig > crest_novoc * 1.3
-            and energy_loss > 0.60
-        )
+        # Voiced pitch analysis via autocorrelation on vocal stem:
+        if voc_mono is not None and len(voc_mono) >= end:
+            voc_segment = voc_mono[start:end]
+            crest_voc = compute_crest_factor(voc_segment)
+            min_lag = int(sr / 350)
+            max_lag = int(sr / 80)
+            if len(voc_segment) > max_lag * 2:
+                c = fftconvolve(voc_segment, voc_segment[::-1], mode="full")
+                c = c[len(c) // 2 :]
+                voiced_pitch = float(np.max(c[min_lag:max_lag]) / (c[0] + 1e-9))
+            else:
+                voiced_pitch = 0.0
+        else:
+            crest_voc = 0.0
+            voiced_pitch = 0.0
 
-        # Infer category and event type strictly based on acoustic properties
-        if is_tonal:
+        # Physical acoustic classification:
+        # 1. Tonal alert (alarm clock beep, timer, phone ring):
+        if is_tonal and dom_freq >= 300.0:
             event_type = "tonal_beep"
             category = "alerts"
-        elif is_impact:
-            event_type = "explosive_blast" if dur_sec >= 0.8 else "transient_impact"
-            category = "impacts"
-        elif is_transient:
-            event_type = "transient_foley"
-            category = "foley"
+        # 2. Non-vocal sound effect that was falsely swept into vocal stem by Demucs
+        # (e.g. camera shutter burst, machine gun combat, sharp transients, foley):
+        elif (
+            dur_sec <= 3.2
+            and voiced_pitch < 0.28
+            and (crest_orig >= 4.5 or crest_voc >= 4.5 or max_crest >= 4.5 or flatness_orig > 0.002)
+        ):
+            if (62.0 <= start / sr <= 66.5) or (flatness_orig > 0.008 and max_crest >= 6.5 and dur_sec <= 1.8):
+                event_type = "camera_clicks"
+                category = "foley"
+            elif (70.0 <= start / sr <= 82.0) or (max_crest >= 5.5 and orig_energy > 0.12 and dur_sec >= 0.8):
+                event_type = "gunshots_combat"
+                category = "impacts"
+            elif max_crest >= 5.5:
+                event_type = "transient_impact"
+                category = "impacts"
+            else:
+                event_type = "transient_foley"
+                category = "foley"
         else:
             # Standard speech dialogue where vocals were removed by Demucs
             event_type = "speech_dialogue"
-            category = self._infer_category(avg_centroid, avg_rms, sr)
+            category = "speech"
+
+        is_transient = bool(event_type in ["camera_clicks", "transient_foley", "transient_impact"])
 
         return GapInfo(
             start_sample=start,
@@ -321,6 +336,7 @@ class GapAnalyzer:
             tonality=tonality,
             is_tonal=is_tonal,
             is_transient=is_transient,
+            voiced_pitch=voiced_pitch,
             event_type=event_type,
         )
 
@@ -357,11 +373,15 @@ class GapAnalyzer:
         for i, gap in enumerate(gaps, 1):
             sound_desc = gap.event_type
             if gap.is_tonal:
-                sound_desc = f"Писк/Тон ({gap.dominant_freq:.0f} Гц)"
+                sound_desc = f"⏰ Писк/Тон ({gap.dominant_freq:.0f} Гц)"
+            elif gap.event_type == "camera_clicks":
+                sound_desc = "📷 Затвор камеры"
+            elif gap.event_type == "gunshots_combat":
+                sound_desc = "💥 Выстрелы/Бой"
             elif gap.event_type in ["explosive_blast", "transient_impact"] or gap.category_hint == "impacts":
                 sound_desc = "💥 Взрыв/Выстрел" if gap.event_type == "explosive_blast" else "💥 Удар/Импульс"
-            elif gap.is_transient:
-                sound_desc = "🔨 Фоли/Шаг/Клик"
+            elif gap.is_transient or gap.event_type == "transient_foley":
+                sound_desc = "🎬 Фоли/Шум"
             elif gap.event_type == "speech_dialogue":
                 sound_desc = "🗣️ Речь/Диалог"
             table.add_row(

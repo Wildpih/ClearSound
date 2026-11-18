@@ -49,6 +49,7 @@ class SoundInserter:
         sound_overrides: Optional[Dict[int, Path | str]] = None,
         enabled_map: Optional[Dict[int, bool]] = None,
         vocals: Optional[np.ndarray] = None,
+        original: Optional[np.ndarray] = None,
     ) -> np.ndarray:
         """Insert matched sounds into the no-vocals audio.
 
@@ -102,34 +103,79 @@ class SoundInserter:
                 except Exception:
                     pass
 
-            # ── 2. Decide if sound patch insertion is needed ───────────────
+            # ── 2. Decide action based on event type ────────────────────────
             sound_path: Optional[Path | str] = None
             is_manual_override = bool(sound_overrides and i in sound_overrides and sound_overrides[i])
-            if is_manual_override:
-                override_val = str(sound_overrides[i])
-                if override_val == "__none__":
+            override_val = str(sound_overrides[i]) if is_manual_override else ""
+
+            # Case A: Non-vocal SFX (camera shutter clicks, gunshots, impacts, foley)
+            # Demucs mistakenly stripped these non-vocal sounds into vocals.wav!
+            if gap.event_type in ["camera_clicks", "gunshots_combat", "transient_impact", "transient_foley"]:
+                if is_manual_override and override_val not in ["__restore_orig__", "__none__"]:
+                    sound_path = sound_overrides[i]
+                elif is_manual_override and override_val == "__none__":
                     continue
-                sound_path = sound_overrides[i]
+                else:
+                    # Restore authentic original sound effect that was muffled by vocal separation
+                    if original is not None:
+                        orig_patch = original[:, start:end] if is_stereo else original[start:end]
+                        fade_len = min(int(0.005 * sr), (end - start) // 4)
+                        if is_stereo:
+                            for ch in range(result.shape[0]):
+                                seg = orig_patch[ch].copy()
+                                if fade_len > 0:
+                                    seg[:fade_len] = result[ch, start:start+fade_len] * (1 - np.linspace(0, 1, fade_len)) + seg[:fade_len] * np.linspace(0, 1, fade_len)
+                                    seg[-fade_len:] = seg[-fade_len:] * (1 - np.linspace(0, 1, fade_len)) + result[ch, end-fade_len:end] * np.linspace(0, 1, fade_len)
+                                result[ch, start:end] = seg
+                        else:
+                            seg = orig_patch.copy()
+                            if fade_len > 0:
+                                seg[:fade_len] = result[start:start+fade_len] * (1 - np.linspace(0, 1, fade_len)) + seg[:fade_len] * np.linspace(0, 1, fade_len)
+                                seg[-fade_len:] = seg[-fade_len:] * (1 - np.linspace(0, 1, fade_len)) + result[end-fade_len:end] * np.linspace(0, 1, fade_len)
+                            result[start:end] = seg
+                        inserted_count += 1
+                        continue
+                    else:
+                        continue
+
+            # Case B: Standard speech dialogue (character talking over music/background)
+            elif gap.event_type == "speech_dialogue":
+                if is_manual_override and override_val != "__none__":
+                    sound_path = sound_overrides[i]
+                else:
+                    # 1. Eliminate residual vocal formant bleed ("бубняж / звук как под водой"):
+                    if vocals is not None:
+                        try:
+                            if is_stereo:
+                                for ch in range(result.shape[0]):
+                                    result[ch, start:end] = self._debleed_vocal(result[ch, start:end], vocals[ch, start:end], sr)
+                            else:
+                                result[start:end] = self._debleed_vocal(result[start:end], vocals[start:end], sr)
+                        except Exception:
+                            pass
+
+                    # 2. Un-muffle background music by restoring the presence frequencies suppressed by Demucs:
+                    try:
+                        if is_stereo:
+                            for ch in range(result.shape[0]):
+                                result[ch, start:end] = apply_eq(result[ch, start:end], sr, freq=2400.0, gain_db=3.5, q=1.0)
+                        else:
+                            result[start:end] = apply_eq(result[start:end], sr, freq=2400.0, gain_db=3.5, q=1.0)
+                    except Exception:
+                        pass
+                    continue
             else:
-                # Speech dialogue gaps are preserved as clean background (no vocal)!
-                if gap.event_type == "speech_dialogue":
-                    continue
-
-                # Automatic insertion is ONLY performed for:
-                # - Tonal alerts (alarm beeps, timer rings, etc.)
-                # - Explicit transient foley / impacts that were lost
-                # - Near-vacuum gaps (where vocal removal left dead silence < 0.005)
-                is_lost_event = (
-                    gap.is_tonal
-                    or gap.event_type in ["tonal_beep", "transient_foley", "explosive_blast", "transient_impact"]
-                    or (gap.energy_loss_ratio > 0.80 and novoc_rms < 0.005)
-                )
-                if not is_lost_event:
-                    continue
-
-                gap_matches = matches.get(i, [])
-                if gap_matches and gap_matches[0].similarity_score >= 0.70:
-                    sound_path = gap_matches[0].sound.path
+                # Other events (e.g. tonal_beep)
+                if is_manual_override:
+                    if override_val == "__none__":
+                        continue
+                    sound_path = sound_overrides[i]
+                else:
+                    gap_matches = matches.get(i, [])
+                    if gap_matches and gap_matches[0].similarity_score >= 0.70:
+                        sound_path = gap_matches[0].sound.path
+                    else:
+                        continue
 
             if not sound_path:
                 continue
@@ -180,6 +226,28 @@ class SoundInserter:
             f"[bold green]✓ Вставлено звуков: {inserted_count}/{len(gaps)}[/]"
         )
         return result
+
+    def _debleed_vocal(self, audio_seg: np.ndarray, voc_seg: np.ndarray, sr: int = 44100) -> np.ndarray:
+        """Attenuate residual vocal formants that Demucs leaked into no_vocals."""
+        if len(audio_seg) < 512 or np.max(np.abs(voc_seg)) < 1e-6:
+            return audio_seg
+        from scipy.signal import stft, istft
+        nperseg = min(2048, len(audio_seg))
+        noverlap = nperseg * 3 // 4
+        _, _, Zn = stft(audio_seg, fs=sr, nperseg=nperseg, noverlap=noverlap)
+        _, _, Zv = stft(voc_seg, fs=sr, nperseg=nperseg, noverlap=noverlap)
+        mag_n = np.abs(Zn)
+        mag_v = np.abs(Zv)
+        phase_n = np.angle(Zn)
+        freqs = np.linspace(0, sr / 2, mag_n.shape[0])
+        vocal_band = (freqs >= 100) & (freqs <= 3500)
+        v_peak = np.max(mag_v) + 1e-9
+        v_act = np.clip(mag_v / v_peak, 0.0, 1.0)
+        gain = np.ones_like(mag_n)
+        gain[vocal_band, :] = np.clip(1.0 - 0.40 * v_act[vocal_band, :], 0.35, 1.0)
+        Z_clean = (mag_n * gain) * np.exp(1j * phase_n)
+        _, out = istft(Z_clean, fs=sr, nperseg=nperseg, noverlap=noverlap)
+        return out[:len(audio_seg)].astype(audio_seg.dtype)
 
     def _prepare_patch_by_path(
         self,
