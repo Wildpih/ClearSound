@@ -152,38 +152,37 @@ class SoundMatcher:
             # ── 1. Acoustic Type Rules & Penalties ────────────────────
             # If gap is standard speech dialogue:
             if gap.event_type == "speech_dialogue":
-                # Never insert beeps, alerts, gunshots, or clicks into normal speech!
-                if cat_lower in ["alerts", "impacts"] or (donor_obj and (donor_obj.is_tonal or donor_obj.is_transient)):
-                    sim = 0.01
+                # Never auto-insert foley, alerts, impacts, or random noise into speech!
+                sim = 0.01
 
             # If gap is a camera drop impact:
             elif gap.event_type == "camera_drop":
                 if any(w in name_lower for w in ["camera_drop", "drop_impact", "camera_table", "drop_table"]):
-                    sim = 0.98
+                    sim = 0.99
                 elif cat_lower == "foley" and "drop" in name_lower:
-                    sim = 0.92
-                elif cat_lower in ["foley", "impacts"]:
-                    sim = 0.60 + 0.20 * sim
+                    sim = 0.95
                 else:
-                    sim = 0.02
+                    sim = 0.01
 
             # If gap is camera shutter clicks:
             elif gap.event_type == "camera_clicks":
                 if any(w in name_lower for w in ["camera_shutter", "shutter_burst", "shutter_single", "camera_clicks"]):
-                    sim = 0.98
+                    sim = 0.99
                 elif cat_lower == "foley" and any(w in name_lower for w in ["click", "switch", "tap"]):
-                    sim = 0.75 + 0.15 * sim
+                    sim = 0.85
                 else:
-                    sim = 0.02
+                    sim = 0.01
 
             # If gap is combat gunshots:
             elif gap.event_type == "gunshots_combat":
                 if any(w in name_lower for w in ["combat_rifle", "gunshot", "shotgun", "pistol"]):
-                    sim = 0.98
+                    sim = 0.99
+                elif any(w in name_lower for w in ["car_crash", "thunder", "glass_shatter", "drop"]):
+                    sim = 0.01  # NEVER pick car crash or thunder for gunfire!
                 elif cat_lower == "impacts":
-                    sim = 0.75 + 0.20 * sim
+                    sim = 0.35 + 0.15 * sim
                 else:
-                    sim = 0.02
+                    sim = 0.01
 
             # If gap is a tonal beep or alarm:
             elif gap.is_tonal or gap.event_type == "tonal_beep":

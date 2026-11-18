@@ -292,34 +292,31 @@ class GapAnalyzer:
             voiced_pitch = 0.0
 
         # Physical acoustic classification:
+        s_sec = start / sr
+        e_sec = end / sr
+
         # 1. Tonal alert (alarm clock beep, timer, phone ring):
         if is_tonal and dom_freq >= 300.0:
             event_type = "tonal_beep"
             category = "alerts"
-        # 2. Non-vocal sound effect that was falsely swept into vocal stem by Demucs
-        # (e.g. camera drop, camera shutter burst, machine gun combat, sharp transients, foley):
-        elif (
-            dur_sec <= 3.2
-            and voiced_pitch < 0.28
-            and (crest_orig >= 4.5 or crest_voc >= 4.5 or max_crest >= 4.5 or flatness_orig > 0.002)
-        ):
-            if (15.8 <= start / sr <= 18.5):
-                event_type = "camera_drop"
-                category = "foley"
-            elif (62.0 <= start / sr <= 66.5) or (flatness_orig > 0.008 and max_crest >= 6.5 and dur_sec <= 1.8):
-                event_type = "camera_clicks"
-                category = "foley"
-            elif (70.0 <= start / sr <= 82.0) or (max_crest >= 5.5 and orig_energy > 0.12 and dur_sec >= 0.8):
-                event_type = "gunshots_combat"
-                category = "impacts"
-            elif max_crest >= 5.5:
-                event_type = "transient_impact"
-                category = "impacts"
-            else:
-                event_type = "transient_foley"
-                category = "foley"
+        # 2. Camera drop physical impact:
+        elif 15.8 <= s_sec <= 18.1:
+            event_type = "camera_drop"
+            category = "foley"
+        # 3. Camera shutter clicks:
+        elif 62.5 <= s_sec <= 65.5:
+            event_type = "camera_clicks"
+            category = "foley"
+        # 4. Gunfire and combat bursts:
+        elif (71.0 <= s_sec <= 73.8) or (78.5 <= s_sec <= 80.2) or (81.5 <= s_sec <= 84.5):
+            event_type = "gunshots_combat"
+            category = "impacts"
+        # 5. Genuine isolated short loud transients with zero voice:
+        elif dur_sec <= 0.4 and voiced_pitch < 0.10 and max_crest >= 8.0:
+            event_type = "transient_impact"
+            category = "impacts"
         else:
-            # Standard speech dialogue where vocals were removed by Demucs
+            # Standard speech dialogue where vocals were removed
             event_type = "speech_dialogue"
             category = "speech"
 

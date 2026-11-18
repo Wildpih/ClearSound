@@ -215,6 +215,12 @@ def test_2_real_video_pipeline_and_acoustic_verification():
         assert vocal_suppression_ratio < 0.65, f"Voice was not sufficiently suppressed: ratio={vocal_suppression_ratio}"
         print("  ✓ Voice suppression verified objectively: speech energy reduced!")
 
+        # Verify zeroing out of speech before music (eliminates electric murmur)
+        intro_speech_rms = float(np.sqrt(np.mean(enh_mono[int(10.0*sr):int(15.9*sr)]**2)))
+        print(f"  Speech before music RMS (electric murmur suppression): {intro_speech_rms:.8f}")
+        assert intro_speech_rms < 1e-4, f"Expected near 0 for speech before music, got {intro_speech_rms}"
+        print("  ✓ Speech before music smoothly faded to zero, eliminating electric Demucs murmur!")
+
         # 2. Check that Non-Vocal SFX (Camera drop, Camera shutter clicks & Gunshots) were properly restored from library
         drop_gaps = [g for g in win.current_project.gaps if g.event_type == "camera_drop"]
         camera_gaps = [g for g in win.current_project.gaps if g.event_type == "camera_clicks"]
@@ -284,62 +290,79 @@ def test_3_live_adjustments_and_video_remux():
         print("  [SKIP] No projects available for adjustment test")
         return
 
-    app = get_app()
-    win = MainWindow(config=config)
-    win.show()
-    wait_ms(200)
+    orig_critical = QMessageBox.critical
+    orig_warning = QMessageBox.warning
+    QMessageBox.critical = lambda *args, **kwargs: None
+    QMessageBox.warning = lambda *args, **kwargs: None
 
-    # Open the first processed project
-    target_proj = next((p for p in projects if p.status == "processed"), None)
-    if not target_proj:
-        print("  [SKIP] No processed project found")
-        win.close()
-        return
+    win = None
+    try:
+        app = get_app()
+        win = MainWindow(config=config)
+        win.show()
+        wait_ms(200)
 
-    win.open_project(target_proj.id)
-    wait_ms(300)
+        # Open the first processed project
+        target_proj = next((p for p in projects if p.status == "processed"), None)
+        if not target_proj:
+            print("  [SKIP] No processed project found")
+            return
 
-    old_prev_video = target_proj.preview_video_path
-    print(f"  Loaded project: {target_proj.name}, previous preview: {old_prev_video.name if old_prev_video else 'None'}")
+        win.open_project(target_proj.id)
+        wait_ms(300)
 
-    # Simulate user changing gap 0: pick an explosion or alert sound
-    combo_0 = win.segment_editor.table.cellWidget(0, 3)
-    # Find a library sound index
-    target_idx = -1
-    for idx in range(combo_0.count()):
-        if "explosion" in combo_0.itemText(idx).lower() or "alarm" in combo_0.itemText(idx).lower():
-            target_idx = idx
-            break
-    if target_idx == -1 and combo_0.count() > 1:
-        target_idx = 1
+        old_prev_video = target_proj.preview_video_path
+        print(f"  Loaded project: {target_proj.name}, previous preview: {old_prev_video.name if old_prev_video else 'None'}")
 
-    assert target_idx > 0, "Should have sound options in combo"
-    chosen_sound_name = combo_0.itemText(target_idx)
-    print(f"  User selects sound for gap 0: '{chosen_sound_name}'")
-    combo_0.setCurrentIndex(target_idx)
-    wait_ms(200)
+        # Simulate user changing gap 0: pick an explosion or alert sound
+        combo_0 = win.segment_editor.table.cellWidget(0, 3)
+        # Find a library sound index
+        target_idx = -1
+        for idx in range(combo_0.count()):
+            if "explosion" in combo_0.itemText(idx).lower() or "alarm" in combo_0.itemText(idx).lower():
+                target_idx = idx
+                break
+        if target_idx == -1 and combo_0.count() > 1:
+            target_idx = 1
 
-    # Simulate user clicking "⚡ Применить правки"
-    print("  User clicks '⚡ Применить правки'...")
-    win._on_apply_adjustments()
+        assert target_idx > 0, "Should have sound options in combo"
+        chosen_sound_name = combo_0.itemText(target_idx)
+        print(f"  User selects sound for gap 0: '{chosen_sound_name}'")
+        combo_0.setCurrentIndex(target_idx)
+        wait_ms(200)
 
-    # Wait for QuickReinsertWorker to complete
-    loop = QEventLoop()
-    if win.reinsert_worker and win.reinsert_worker.isRunning():
-        win.reinsert_worker.finished.connect(lambda res: loop.quit())
-        win.reinsert_worker.error.connect(lambda err: loop.quit())
-        QTimer.singleShot(30000, loop.quit)
-        loop.exec()
+        # Simulate user clicking "⚡ Применить правки"
+        print("  User clicks '⚡ Применить правки'...")
+        finished_flag = [False]
+        win._on_apply_adjustments()
 
-    wait_ms(300)
-    new_prev_video = win.current_project.preview_video_path
-    print(f"  New preview video generated: {new_prev_video.name}")
-    assert new_prev_video.exists(), "New remuxed preview video must exist on disk"
-    if old_prev_video:
-        assert new_prev_video != old_prev_video, "Preview video should be updated with new timestamp"
+        err_msg = [None]
+        if win.reinsert_worker:
+            win.reinsert_worker.finished.connect(lambda res: finished_flag.__setitem__(0, True))
+            win.reinsert_worker.error.connect(lambda err: (err_msg.__setitem__(0, err), finished_flag.__setitem__(0, True)))
+            for _ in range(300):
+                QApplication.processEvents()
+                if finished_flag[0]:
+                    break
+                time.sleep(0.1)
+            QApplication.processEvents()
 
-    print(">>> TEST 3 PASSED: User adjustments and video remuxing work seamlessly! <<<\n")
-    win.close()
+        if err_msg[0]:
+            print(f"  [ERROR IN WORKER]: {err_msg[0]}")
+
+        wait_ms(300)
+        new_prev_video = win.current_project.preview_video_path
+        print(f"  New preview video generated: {new_prev_video.name}")
+        assert new_prev_video.exists(), "New remuxed preview video must exist on disk"
+        if old_prev_video:
+            assert new_prev_video != old_prev_video, "Preview video should be updated with new timestamp"
+
+        print(">>> TEST 3 PASSED: User adjustments and video remuxing work seamlessly! <<<\n")
+    finally:
+        QMessageBox.critical = orig_critical
+        QMessageBox.warning = orig_warning
+        if win:
+            win.close()
 
 
 def test_4_edge_cases_and_stability():

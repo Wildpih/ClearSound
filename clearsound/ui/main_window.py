@@ -403,6 +403,28 @@ class MainWindow(QMainWindow):
             no_vocals_path=project.preview_novocal_video_path if project.is_video else project.no_vocals_wav,
         )
 
+        # Load audio data into memory if available
+        from clearsound.core.audio_utils import load_audio
+        if project.no_vocals_wav and project.no_vocals_wav.exists():
+            try:
+                self.no_vocals_audio, self.sr = load_audio(project.no_vocals_wav, sr=self.config.sample_rate)
+            except Exception:
+                self.no_vocals_audio = None
+        else:
+            self.no_vocals_audio = None
+
+        if project.source_path and project.source_path.exists():
+            try:
+                self.original_audio, self.sr = load_audio(project.source_path, sr=self.config.sample_rate)
+                # Align background music
+                from clearsound.ui.worker import PipelineWorker
+                pw = PipelineWorker(self.config, project.source_path, self.project_manager, self.library)
+                self.music_track, self.music_offset, self.music_gain, self.music_name = pw._find_and_align_music(self.original_audio, self.sr)
+            except Exception:
+                self.original_audio = None
+        else:
+            self.original_audio = None
+
         # Update timeline waveform & gaps
         self.timeline_widget.set_waveform(project.waveform_peaks)
         self.timeline_widget.set_gaps(project.gaps, project.enabled_map)
@@ -542,6 +564,7 @@ class MainWindow(QMainWindow):
         )
 
     def _on_pipeline_error(self, err: str) -> None:
+        print(f"[PIPELINE ERROR]: {err}")
         self.progress_bar.setVisible(False)
         self.btn_process.setEnabled(True)
         self.btn_new_project.setEnabled(True)
@@ -569,10 +592,13 @@ class MainWindow(QMainWindow):
         if not self.current_project or not self.current_project.no_vocals_wav:
             return
 
-        # Load no_vocals audio if needed
-        if self.no_vocals_audio is None and self.current_project.no_vocals_wav.exists():
-            from clearsound.core.audio_utils import load_audio
+        # Load audio tracks if needed
+        from clearsound.core.audio_utils import load_audio
+        if self.no_vocals_audio is None and self.current_project.no_vocals_wav and self.current_project.no_vocals_wav.exists():
             self.no_vocals_audio, self.sr = load_audio(self.current_project.no_vocals_wav, sr=self.config.sample_rate)
+
+        if self.original_audio is None and self.current_project.source_path and self.current_project.source_path.exists():
+            self.original_audio, self.sr = load_audio(self.current_project.source_path, sr=self.config.sample_rate)
 
         if self.no_vocals_audio is None:
             return
