@@ -17,6 +17,7 @@ CATEGORY_COLORS = {
     "donor": QColor("#22c55e"),
     "impacts": QColor("#ef4444"),
     "speech": QColor("#3b82f6"),
+    "camera_drop": QColor("#06b6d4"),
     "camera_clicks": QColor("#a855f7"),
     "gunshots_combat": QColor("#dc2626"),
     "ambient": QColor("#00d2b4"),

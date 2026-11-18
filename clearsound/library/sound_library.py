@@ -274,6 +274,9 @@ class SoundLibrary:
             ("alerts", "ui_beep_high", lambda: _ui_beep_high(sr, 0.3)),
 
             # ── Foley & Physical Transients ───────────────────────────
+            ("foley", "camera_drop_impact", lambda: _camera_drop_impact(sr, 1.2)),
+            ("foley", "camera_shutter_burst", lambda: _camera_shutter_burst(sr, 2.5)),
+            ("foley", "camera_shutter_single", lambda: _camera_shutter_single(sr, 0.4)),
             ("foley", "door_knock_wood", lambda: _door_knock_wood(sr, 0.8)),
             ("foley", "switch_click", lambda: _switch_click(sr, 0.2)),
             ("foley", "clock_tick", lambda: _clock_tick(sr, 1.5)),
@@ -282,6 +285,7 @@ class SoundLibrary:
             ("foley", "glass_clink", lambda: _glass_clink(sr, 0.6)),
 
             # ── Cinematic Impacts & Explosions ────────────────────────
+            ("impacts", "gunshot_combat_rifle", lambda: _gunshot_combat_rifle(sr, 2.0)),
             ("impacts", "explosion_heavy_blast", lambda: _explosion_heavy_blast(sr, 3.5)),
             ("impacts", "gunshot_pistol_crack", lambda: _gunshot_pistol_crack(sr, 1.0)),
             ("impacts", "shotgun_blast_heavy", lambda: _shotgun_blast_heavy(sr, 1.8)),
@@ -306,6 +310,8 @@ class SoundLibrary:
             cat_dir = self.sounds_dir / category
             cat_dir.mkdir(parents=True, exist_ok=True)
             out_path = cat_dir / f"{name}.wav"
+            if out_path.exists():
+                continue
             try:
                 audio = gen_func()
                 sf.write(str(out_path), audio, sr)
@@ -598,6 +604,76 @@ def _ui_beep_high(sr: int, duration: float = 0.3) -> np.ndarray:
 
 
 # ── Foley & Physical Transients ───────────────────────────────────────
+
+def _camera_drop_impact(sr: int, duration: float = 1.2) -> np.ndarray:
+    """Realistic physical gadget/camera drop impact with initial crack and bounce on table."""
+    samples = int(sr * duration)
+    out = np.zeros(samples, dtype=np.float32)
+    # Primary impact at 0.05s, secondary settle bounce at 0.14s
+    for impact_time, weight in [(0.05, 1.0), (0.14, 0.45)]:
+        st = int(impact_time * sr)
+        n = int(0.35 * sr)
+        if st + n > samples:
+            n = samples - st
+        t = np.linspace(0, n / sr, n, endpoint=False)
+        # Sharp plastic/metal corner transient
+        crack = np.random.randn(n) * np.exp(-t * 90.0) * 0.8
+        # Resonant wooden desk body (120 Hz) + hollow cavity ring (450 Hz)
+        body = (0.7 * np.sin(2 * np.pi * 120 * t) + 0.3 * np.sin(2 * np.pi * 450 * t)) * np.exp(-t * 28.0)
+        out[st : st + n] += (crack + body) * weight
+    return (out / (np.max(np.abs(out)) + 1e-8) * 0.85).astype(np.float32)
+
+
+def _camera_shutter_burst(sr: int, duration: float = 2.5) -> np.ndarray:
+    """Series of rapid mechanical DSLR camera shutter clicks."""
+    samples = int(sr * duration)
+    out = np.zeros(samples, dtype=np.float32)
+    # 5 rapid frames across duration
+    for shot_time in [0.1, 0.4, 0.7, 1.05, 1.4]:
+        st = int(shot_time * sr)
+        n = int(0.12 * sr)
+        if st + n > samples:
+            break
+        t = np.linspace(0, 0.12, n, endpoint=False)
+        # Curtain open click + mirror slap + curtain close
+        click1 = np.random.randn(n) * np.exp(-t * 120.0)
+        click2 = np.random.randn(n) * np.exp(-np.maximum(0, t - 0.035) * 110.0) * 0.8
+        mech_ring = np.sin(2 * np.pi * 3200 * t) * np.exp(-t * 45.0) * 0.35
+        out[st : st + n] += (click1 + click2 + mech_ring)
+    return (out / (np.max(np.abs(out)) + 1e-8) * 0.80).astype(np.float32)
+
+
+def _camera_shutter_single(sr: int, duration: float = 0.4) -> np.ndarray:
+    """Crisp single mechanical camera shutter click."""
+    samples = int(sr * duration)
+    t = np.linspace(0, duration, samples, endpoint=False)
+    click1 = np.random.randn(samples) * np.exp(-t * 130.0)
+    click2 = np.random.randn(samples) * np.exp(-np.maximum(0, t - 0.04) * 120.0) * 0.85
+    ring = np.sin(2 * np.pi * 3400 * t) * np.exp(-t * 50.0) * 0.4
+    out = click1 + click2 + ring
+    return (out / (np.max(np.abs(out)) + 1e-8) * 0.80).astype(np.float32)
+
+
+def _gunshot_combat_rifle(sr: int, duration: float = 2.0) -> np.ndarray:
+    """Burst of automatic combat rifle fire."""
+    from scipy.signal import butter, sosfilt
+    samples = int(sr * duration)
+    out = np.zeros(samples, dtype=np.float32)
+    sos_hp = butter(3, min(2400, sr * 0.45), btype="highpass", fs=sr, output="sos")
+    sos_lp = butter(2, min(1400, sr * 0.45), btype="lowpass", fs=sr, output="sos")
+
+    for burst_time in [0.05, 0.22, 0.39, 0.56]:
+        st = int(burst_time * sr)
+        n = int(0.55 * sr)
+        if st + n > samples:
+            break
+        t = np.linspace(0, 0.55, n, endpoint=False)
+        crack = sosfilt(sos_hp, np.random.randn(n)) * np.exp(-t * 55.0) * 2.2
+        punch = np.sin(2 * np.pi * 95 * t) * np.exp(-t * 30.0) * 1.5
+        tail = sosfilt(sos_lp, np.random.randn(n)) * np.exp(-t * 7.5) * 0.5
+        shot = np.tanh(crack + punch + tail)
+        out[st : st + n] += shot
+    return (out / (np.max(np.abs(out)) + 1e-8) * 0.88).astype(np.float32)
 
 def _door_knock_wood(sr: int, duration: float = 0.8) -> np.ndarray:
     """Realistic wooden door double knock."""

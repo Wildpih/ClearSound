@@ -156,6 +156,35 @@ class SoundMatcher:
                 if cat_lower in ["alerts", "impacts"] or (donor_obj and (donor_obj.is_tonal or donor_obj.is_transient)):
                     sim = 0.01
 
+            # If gap is a camera drop impact:
+            elif gap.event_type == "camera_drop":
+                if any(w in name_lower for w in ["camera_drop", "drop_impact", "camera_table", "drop_table"]):
+                    sim = 0.98
+                elif cat_lower == "foley" and "drop" in name_lower:
+                    sim = 0.92
+                elif cat_lower in ["foley", "impacts"]:
+                    sim = 0.60 + 0.20 * sim
+                else:
+                    sim = 0.02
+
+            # If gap is camera shutter clicks:
+            elif gap.event_type == "camera_clicks":
+                if any(w in name_lower for w in ["camera_shutter", "shutter_burst", "shutter_single", "camera_clicks"]):
+                    sim = 0.98
+                elif cat_lower == "foley" and any(w in name_lower for w in ["click", "switch", "tap"]):
+                    sim = 0.75 + 0.15 * sim
+                else:
+                    sim = 0.02
+
+            # If gap is combat gunshots:
+            elif gap.event_type == "gunshots_combat":
+                if any(w in name_lower for w in ["combat_rifle", "gunshot", "shotgun", "pistol"]):
+                    sim = 0.98
+                elif cat_lower == "impacts":
+                    sim = 0.75 + 0.20 * sim
+                else:
+                    sim = 0.02
+
             # If gap is a tonal beep or alarm:
             elif gap.is_tonal or gap.event_type == "tonal_beep":
                 # If donor from track has matching frequency:

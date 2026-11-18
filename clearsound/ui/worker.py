@@ -22,6 +22,9 @@ from clearsound.core.sound_inserter import SoundInserter
 from clearsound.core.sound_matcher import MatchResult, SoundMatcher
 from clearsound.core.voice_remover import VoiceRemover
 from clearsound.library.sound_library import SoundLibrary
+from rich.console import Console
+
+console = Console()
 
 
 class PipelineWorker(QThread):
@@ -80,10 +83,24 @@ class PipelineWorker(QThread):
             matcher = SoundMatcher(self.config, self.library)
             matches = matcher.find_matches(gaps, donors=donors)
 
-            # ── Step 4: Sound Insertion & Muffle Boost ────────────────
+            # ── Step 4: Sound Insertion & Clean Music Substitution ─────
             self.progress.emit("Восстановление звучания и вставка звуков...", 85)
+            music_track, music_offset, music_gain, music_name = self._find_and_align_music(original, sr)
+            if music_track is not None:
+                console.print(f"🎵 Найдена чистая фоновая музыка: [bold cyan]{music_name}[/] (смещение {music_offset/sr:.2f}с)")
+
             inserter = SoundInserter(self.config)
-            enhanced = inserter.insert(no_vocals, gaps, matches, sr, vocals=vocals, original=original)
+            enhanced = inserter.insert(
+                no_vocals,
+                gaps,
+                matches,
+                sr,
+                vocals=vocals,
+                music_track=music_track,
+                music_offset_samples=music_offset,
+                music_gain=music_gain,
+                original=original,
+            )
 
             enhanced_wav = self.config.temp_dir / f"{self.input_path.stem}_enhanced.wav"
             save_audio(enhanced, enhanced_wav, sr)
@@ -121,11 +138,91 @@ class PipelineWorker(QThread):
                 "enhanced_wav": enhanced_wav,
                 "preview_video_path": preview_video_path,
                 "preview_novocal_video_path": preview_novocal_video_path,
+                "music_track": music_track,
+                "music_offset": music_offset,
+                "music_gain": music_gain,
+                "music_name": music_name,
             }
             self.finished.emit(result)
 
         except Exception as e:
             self.error.emit(str(e))
+
+    def _find_and_align_music(
+        self, audio: np.ndarray, sr: int
+    ) -> Tuple[Optional[np.ndarray], int, float, str]:
+        """Detect and align clean instrumental background music from the library."""
+        music_dir = self.config.sounds_dir / "music"
+        if not music_dir.exists():
+            return None, 0, 1.0, ""
+
+        music_files = list(music_dir.glob("*.wav")) + list(music_dir.glob("*.mp3")) + list(music_dir.glob("*.flac"))
+        if not music_files:
+            return None, 0, 1.0, ""
+
+        import scipy.signal as signal
+        audio_mono = np.mean(audio, axis=0) if audio.ndim > 1 else audio
+        ds = 4
+        audio_ds = audio_mono[::ds]
+
+        best_file = None
+        best_peak = 0.0
+        best_offset = 0
+
+        for f in music_files:
+            try:
+                m_raw, sr_m = load_audio(f, sr=sr, mono=True)
+                m_ds = m_raw[::ds]
+                if len(m_ds) < 100 or len(audio_ds) < 100:
+                    continue
+                corr = signal.fftconvolve(audio_ds, m_ds[::-1], mode="full")
+                peak_idx = int(np.argmax(np.abs(corr)))
+                norm_factor = np.linalg.norm(audio_ds) * np.linalg.norm(m_ds) + 1e-9
+                peak_val = float(np.abs(corr[peak_idx]) / norm_factor)
+                if peak_val > best_peak and peak_val >= 0.04:
+                    best_peak = peak_val
+                    best_file = f
+                    offset_ds = peak_idx - len(m_ds) + 1
+                    best_offset = offset_ds * ds
+            except Exception:
+                continue
+
+        if best_file is None:
+            return None, 0, 1.0, ""
+
+        # Refine offset at full sample rate
+        try:
+            m_full, sr_m = load_audio(best_file, sr=sr, mono=False)
+            m_mono = np.mean(m_full, axis=0) if m_full.ndim > 1 else m_full
+            win_len = min(int(10.0 * sr), len(m_mono))
+            sub_m = m_mono[:win_len]
+            search_start = max(0, best_offset - int(0.5 * sr))
+            search_end = min(len(audio_mono), best_offset + win_len + int(0.5 * sr))
+            sub_a = audio_mono[search_start:search_end]
+            if len(sub_a) >= len(sub_m):
+                c = signal.fftconvolve(sub_a, sub_m[::-1], mode="valid")
+                fine_idx = int(np.argmax(np.abs(c)))
+                exact_offset = search_start + fine_idx
+            else:
+                exact_offset = max(0, best_offset)
+
+            # Compute relative gain by comparing symphonic body of music
+            m_start_eval = int(len(m_mono) * 0.4)
+            m_end_eval = int(len(m_mono) * 0.8)
+            a_start_eval = exact_offset + m_start_eval
+            a_end_eval = min(len(audio_mono), exact_offset + m_end_eval)
+            eval_len = min(m_end_eval - m_start_eval, a_end_eval - a_start_eval)
+
+            if eval_len > int(sr * 2):
+                rms_a = float(np.sqrt(np.mean(audio_mono[a_start_eval : a_start_eval + eval_len] ** 2))) + 1e-6
+                rms_m = float(np.sqrt(np.mean(m_mono[m_start_eval : m_start_eval + eval_len] ** 2))) + 1e-6
+                gain = float(np.clip((rms_a / rms_m) * 0.82, 0.45, 0.85))
+            else:
+                gain = 0.80
+
+            return m_full, exact_offset, gain, best_file.stem
+        except Exception:
+            return None, 0, 1.0, ""
 
 
 class QuickReinsertWorker(QThread):
@@ -148,6 +245,9 @@ class QuickReinsertWorker(QThread):
         is_video: bool,
         vocals: Optional[np.ndarray] = None,
         original: Optional[np.ndarray] = None,
+        music_track: Optional[np.ndarray] = None,
+        music_offset_samples: int = 0,
+        music_gain: float = 1.0,
         parent: Optional[QObject] = None,
     ):
         super().__init__(parent)
@@ -163,6 +263,9 @@ class QuickReinsertWorker(QThread):
         self.is_video = is_video
         self.vocals = vocals
         self.original = original
+        self.music_track = music_track
+        self.music_offset_samples = music_offset_samples
+        self.music_gain = music_gain
 
     def run(self) -> None:
         try:
@@ -176,6 +279,9 @@ class QuickReinsertWorker(QThread):
                 sound_overrides=self.sound_overrides,
                 enabled_map=self.enabled_map,
                 vocals=self.vocals,
+                music_track=self.music_track,
+                music_offset_samples=self.music_offset_samples,
+                music_gain=self.music_gain,
                 original=self.original,
             )
 

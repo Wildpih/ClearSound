@@ -33,6 +33,7 @@ CATEGORY_BADGES = {
     "donor": ("🎯 Donor", "background-color: #052e16; color: #4ade80; border: 1px solid #22c55e; font-weight: bold; border-radius: 4px; padding: 2px 6px;"),
     "impacts": ("💥 Impacts", "background-color: #450a0a; color: #f87171; border: 1px solid #ef4444; font-weight: bold; border-radius: 4px; padding: 2px 6px;"),
     "speech": ("🗣️ Речь", "background-color: #172554; color: #60a5fa; border: 1px solid #3b82f6; font-weight: bold; border-radius: 4px; padding: 2px 6px;"),
+    "camera_drop": ("📷 Падение", "background-color: #083344; color: #67e8f9; border: 1px solid #06b6d4; font-weight: bold; border-radius: 4px; padding: 2px 6px;"),
     "camera_clicks": ("📷 Затвор", "background-color: #2e1065; color: #d8b4fe; border: 1px solid #a855f7; font-weight: bold; border-radius: 4px; padding: 2px 6px;"),
     "gunshots_combat": ("💥 Выстрел", "background-color: #450a0a; color: #fca5a5; border: 1px solid #ef4444; font-weight: bold; border-radius: 4px; padding: 2px 6px;"),
     "ambient": ("🌊 Ambient", "background-color: #0b2d2a; color: #00f0cf; border: 1px solid #00d2b4; font-weight: bold; border-radius: 4px; padding: 2px 6px;"),
@@ -150,6 +151,9 @@ class SegmentEditorWidget(QWidget):
         volume_adjustments: Optional[Dict[int, float]] = None,
         sound_overrides: Optional[Dict[int, Path]] = None,
         enabled_map: Optional[Dict[int, bool]] = None,
+        has_clean_music: bool = False,
+        music_name: str = "",
+        music_offset_sec: float = 0.0,
     ) -> None:
         """Populate the table with detected gaps and match suggestions."""
         self._block_updates = True
@@ -203,33 +207,52 @@ class SegmentEditorWidget(QWidget):
                 "border: 1px solid #3d4d68; border-radius: 6px; padding: 4px 8px;"
             )
             gap_matches = self.matches.get(i, [])
-            is_sfx_event = gap.event_type in ["camera_clicks", "gunshots_combat", "transient_impact", "transient_foley"]
 
-            # Option 0: For non-vocal sound events that Demucs suppressed, default is restoring the original authentic sound
-            if is_sfx_event:
-                combo_sound.addItem("🎯 Восстановлен оригинальный звук [100%]", "__restore_orig__")
+            # Option items based on acoustic category:
+            if gap.event_type == "camera_drop":
+                combo_sound.addItem("📷 Падение камеры [Foley Impact]", "camera_drop_impact")
+                combo_sound.addItem("🔇 Чистый фон (без звука)", "__none__")
+            elif gap.event_type == "camera_clicks":
+                combo_sound.addItem("📷 Затвор камеры [Серия кадров]", "camera_shutter_burst")
+                combo_sound.addItem("📷 Затвор камеры [Одиночный]", "camera_shutter_single")
+                combo_sound.addItem("🔇 Чистый фон (без звука)", "__none__")
+            elif gap.event_type == "gunshots_combat":
+                combo_sound.addItem("💥 Очередь боя [Винтовка]", "gunshot_combat_rifle")
+                combo_sound.addItem("💥 Выстрел из пистолета", "gunshot_pistol_m1911")
+                combo_sound.addItem("🔇 Чистый фон (без звука)", "__none__")
+            elif gap.is_tonal:
+                combo_sound.addItem("⏰ Цифровой будильник / таймер", "alarm_beep_digital")
+                combo_sound.addItem("🔇 Чистый фон (без звука)", "__none__")
+            elif gap.event_type == "speech_dialogue":
+                gap_has_music = has_clean_music and (gap.end_sec >= music_offset_sec)
+                if gap_has_music:
+                    label = f"🎵 Чистая музыка ({music_name})" if music_name else "🎵 Чистая музыка [без голоса]"
+                    combo_sound.addItem(label, "__clean_music__")
                 combo_sound.addItem("🔇 Чистый фон (без звука)", "__none__")
             else:
                 combo_sound.addItem("🔇 Чистый фон (без звука)", "__none__")
-                if gap.is_tonal:
-                    combo_sound.addItem("🎯 Восстановленный писк (EQ Boost)", "__restore_orig__")
 
             # Add match recommendations
             for match in gap_matches:
                 score_pct = int(match.similarity_score * 100)
-                if match.is_donor:
-                    prefix = "" if match.sound.name.startswith("🎯") else "🎯 "
-                    label = f"{prefix}{match.sound.name} [{score_pct}% совпадение]"
-                else:
-                    label = f"⭐ {match.sound.name} ({match.sound.category}) [{score_pct}%]"
-                combo_sound.addItem(label, str(match.sound.path))
+                m_path = str(match.sound.path)
+                m_name = match.sound.name
+                if combo_sound.findData(m_path) < 0 and combo_sound.findData(m_name) < 0:
+                    if match.is_donor:
+                        prefix = "" if match.sound.name.startswith("🎯") else "🎯 "
+                        label = f"{prefix}{match.sound.name} [{score_pct}%]"
+                    else:
+                        label = f"⭐ {match.sound.name} ({match.sound.category}) [{score_pct}%]"
+                    combo_sound.addItem(label, m_path)
 
             # Add library separator and all library sounds
             combo_sound.insertSeparator(combo_sound.count())
             all_lib = self.library.list_all()
             for sound in all_lib:
-                if not any(m.sound.path == sound.path for m in gap_matches):
-                    combo_sound.addItem(f"📁 {sound.name} ({sound.category})", str(sound.path))
+                s_path = str(sound.path)
+                s_name = sound.name
+                if combo_sound.findData(s_path) < 0 and combo_sound.findData(s_name) < 0:
+                    combo_sound.addItem(f"📁 {sound.name} ({sound.category})", s_path)
 
             # Add custom browse option
             combo_sound.insertSeparator(combo_sound.count())
@@ -244,15 +267,8 @@ class SegmentEditorWidget(QWidget):
                 else:
                     combo_sound.insertItem(0, f"📄 {Path(cur_path).name}", cur_path)
                     combo_sound.setCurrentIndex(0)
-            elif is_sfx_event:
-                idx = combo_sound.findData("__restore_orig__")
-                combo_sound.setCurrentIndex(idx if idx >= 0 else 0)
-            elif gap.is_tonal:
-                idx = combo_sound.findData("__restore_orig__")
-                combo_sound.setCurrentIndex(idx if idx >= 0 else 0)
             else:
-                idx = combo_sound.findData("__none__")
-                combo_sound.setCurrentIndex(idx if idx >= 0 else 0)
+                combo_sound.setCurrentIndex(0)
 
             combo_sound.currentIndexChanged.connect(
                 lambda idx, row=i, cb=combo_sound: self._on_sound_combo_changed(row, cb)
@@ -359,7 +375,7 @@ class SegmentEditorWidget(QWidget):
                 combo.setCurrentIndex(0)
                 return
         elif data:
-            if data in ["__restore_orig__", "__none__"]:
+            if data in ["__clean_music__", "__none__", "camera_drop_impact", "camera_shutter_burst", "camera_shutter_single", "gunshot_combat_rifle", "gunshot_pistol_m1911", "alarm_beep_digital"]:
                 self.sound_overrides[row] = data
             else:
                 self.sound_overrides[row] = Path(data)

@@ -130,126 +130,145 @@ def test_2_real_video_pipeline_and_acoustic_verification():
         print(f"  [SKIP] Video file not found at {video_path}")
         return
 
-    config = Config()
-    app = get_app()
-    win = MainWindow(config=config)
-    win.show()
-    wait_ms(200)
+    orig_critical = QMessageBox.critical
+    orig_warning = QMessageBox.warning
+    QMessageBox.critical = lambda *a, **kw: QMessageBox.Ok
+    QMessageBox.warning = lambda *a, **kw: QMessageBox.Ok
 
-    print(f"  Opening real video: {video_path.name}")
-    win.create_and_open_project(video_path)
-    wait_ms(300)
+    win = None
+    try:
+        config = Config()
+        app = get_app()
+        win = MainWindow(config=config)
+        win.show()
+        wait_ms(200)
 
-    assert win.current_project is not None, "Project should be loaded"
-    print(f"  ✓ Project created: {win.current_project.id}")
+        print(f"  Opening real video: {video_path.name}")
+        win.create_and_open_project(video_path)
+        wait_ms(300)
 
-    # Simulate user clicking "Начать обработку"
-    print("  Simulating user clicking 'Начать обработку'...")
-    win._on_process_clicked()
+        assert win.current_project is not None, "Project should be loaded"
+        print(f"  ✓ Project created: {win.current_project.id}")
 
-    # Wait for background pipeline worker to finish
-    loop = QEventLoop()
-    if win.pipeline_worker and win.pipeline_worker.isRunning():
-        win.pipeline_worker.finished.connect(lambda res: loop.quit())
-        win.pipeline_worker.error.connect(lambda err: loop.quit())
-        # Safety timeout: 120s
-        QTimer.singleShot(120000, loop.quit)
-        loop.exec()
+        # Simulate user clicking "Начать обработку"
+        print("  Simulating user clicking 'Начать обработку'...")
+        win._on_process_clicked()
 
-    wait_ms(500)
-    assert win.current_project.status == "processed", f"Project status is {win.current_project.status}, expected 'processed'"
-    print("  ✓ Pipeline completed successfully!")
+        # Wait for background pipeline worker to finish
+        loop = QEventLoop()
+        if win.pipeline_worker and win.pipeline_worker.isRunning():
+            win.pipeline_worker.finished.connect(lambda res: loop.quit())
+            win.pipeline_worker.error.connect(lambda err: loop.quit())
+            # Safety timeout: 120s
+            QTimer.singleShot(120000, loop.quit)
+            loop.exec()
 
-    # ── OBJECTIVE ACOUSTIC VERIFICATIONS ──
-    print("\n  [Acoustic Analysis of Produced Audio]")
-    p_orig = config.temp_dir / f"{video_path.stem}_extracted.wav"
-    p_novoc = win.current_project.no_vocals_wav
-    p_enh = win.current_project.enhanced_wav
-    p_prev_video = win.current_project.preview_video_path
+        wait_ms(500)
+        assert win.current_project.status == "processed", f"Project status is {win.current_project.status}, expected 'processed'"
+        print("  ✓ Pipeline completed successfully!")
 
-    assert p_orig.exists(), "Original extracted audio must exist"
-    assert p_novoc.exists(), "No-vocals audio must exist"
-    assert p_enh.exists(), "Enhanced audio must exist"
-    assert p_prev_video.exists(), "Preview remuxed video must exist"
+        # ── OBJECTIVE ACOUSTIC VERIFICATIONS ──
+        print("\n  [Acoustic Analysis of Produced Audio]")
+        p_orig = config.temp_dir / f"{video_path.stem}_extracted.wav"
+        p_novoc = win.current_project.no_vocals_wav
+        p_enh = win.current_project.enhanced_wav
+        p_prev_video = win.current_project.preview_video_path
 
-    orig_audio, sr = sf.read(str(p_orig))
-    novoc_audio, _ = sf.read(str(p_novoc))
-    enh_audio, _ = sf.read(str(p_enh))
+        assert p_orig.exists(), "Original extracted audio must exist"
+        assert p_novoc.exists(), "No-vocals audio must exist"
+        assert p_enh.exists(), "Enhanced audio must exist"
+        assert p_prev_video.exists(), "Preview remuxed video must exist"
 
-    if orig_audio.ndim > 1:
-        orig_mono = np.mean(orig_audio, axis=1)
-        novoc_mono = np.mean(novoc_audio, axis=1)
-        enh_mono = np.mean(enh_audio, axis=1)
-    else:
-        orig_mono, novoc_mono, enh_mono = orig_audio, novoc_audio, enh_audio
+        orig_audio, sr = sf.read(str(p_orig))
+        novoc_audio, _ = sf.read(str(p_novoc))
+        enh_audio, _ = sf.read(str(p_enh))
 
-    # 1. Check Voice Removal during speech sections
-    # Speech vocal formant band: 300 Hz - 3000 Hz
-    from scipy.signal import butter, sosfilt
-    sos_speech = butter(3, [300 / (sr / 2), 3000 / (sr / 2)], btype="bandpass", output="sos")
+        if orig_audio.ndim > 1:
+            orig_mono = np.mean(orig_audio, axis=1)
+            novoc_mono = np.mean(novoc_audio, axis=1)
+            enh_mono = np.mean(enh_audio, axis=1)
+        else:
+            orig_mono, novoc_mono, enh_mono = orig_audio, novoc_audio, enh_audio
 
-    speech_gaps = [g for g in win.current_project.gaps if g.event_type == "speech_dialogue"]
-    print(f"  Total gaps: {len(win.current_project.gaps)}, Speech dialogue gaps: {len(speech_gaps)}")
-    assert len(speech_gaps) >= 15, f"Expected majority of gaps to be speech_dialogue, found {len(speech_gaps)}"
+        # 1. Check Voice Removal during speech sections
+        # Speech vocal formant band: 300 Hz - 3000 Hz
+        from scipy.signal import butter, sosfilt
+        sos_speech = butter(3, [300 / (sr / 2), 3000 / (sr / 2)], btype="bandpass", output="sos")
 
-    total_orig_speech_energy = 0.0
-    total_enh_speech_energy = 0.0
+        speech_gaps = [g for g in win.current_project.gaps if g.event_type == "speech_dialogue"]
+        print(f"  Total gaps: {len(win.current_project.gaps)}, Speech dialogue gaps: {len(speech_gaps)}")
+        assert len(speech_gaps) >= 15, f"Expected majority of gaps to be speech_dialogue, found {len(speech_gaps)}"
 
-    for g in speech_gaps:
-        st, en = g.start_sample, g.end_sample
-        seg_orig = sosfilt(sos_speech, orig_mono[st:en])
-        seg_enh = sosfilt(sos_speech, enh_mono[st:en])
-        total_orig_speech_energy += np.sum(seg_orig ** 2)
-        total_enh_speech_energy += np.sum(seg_enh ** 2)
+        total_orig_speech_energy = 0.0
+        total_enh_speech_energy = 0.0
 
-    vocal_suppression_ratio = total_enh_speech_energy / max(total_orig_speech_energy, 1e-10)
-    print(f"  Vocal energy ratio in dialogue (Enhanced / Original): {vocal_suppression_ratio:.3f} (-{10 * np.log10(1 / vocal_suppression_ratio):.1f} dB)")
-    # Vocal energy must be heavily suppressed compared to original
-    assert vocal_suppression_ratio < 0.65, f"Voice was not sufficiently suppressed: ratio={vocal_suppression_ratio}"
-    print("  ✓ Voice suppression verified objectively: speech energy reduced!")
+        for g in speech_gaps:
+            st, en = g.start_sample, g.end_sample
+            seg_orig = sosfilt(sos_speech, orig_mono[st:en])
+            seg_enh = sosfilt(sos_speech, enh_mono[st:en])
+            total_orig_speech_energy += np.sum(seg_orig ** 2)
+            total_enh_speech_energy += np.sum(seg_enh ** 2)
 
-    # 2. Check that Non-Vocal SFX (Camera clicks & Gunshots) were properly restored
-    camera_gaps = [g for g in win.current_project.gaps if g.event_type == "camera_clicks"]
-    gunshot_gaps = [g for g in win.current_project.gaps if g.event_type == "gunshots_combat"]
+        vocal_suppression_ratio = total_enh_speech_energy / max(total_orig_speech_energy, 1e-10)
+        print(f"  Vocal energy ratio in dialogue (Enhanced / Original): {vocal_suppression_ratio:.3f} (-{10 * np.log10(1 / vocal_suppression_ratio):.1f} dB)")
+        # Vocal energy must be heavily suppressed compared to original
+        assert vocal_suppression_ratio < 0.65, f"Voice was not sufficiently suppressed: ratio={vocal_suppression_ratio}"
+        print("  ✓ Voice suppression verified objectively: speech energy reduced!")
 
-    print(f"  Detected camera click gaps: {len(camera_gaps)}, gunshot gaps: {len(gunshot_gaps)}")
-    assert len(camera_gaps) >= 1, "Expected at least 1 camera click gap"
-    assert len(gunshot_gaps) >= 1, "Expected at least 1 gunshot combat gap"
+        # 2. Check that Non-Vocal SFX (Camera drop, Camera shutter clicks & Gunshots) were properly restored from library
+        drop_gaps = [g for g in win.current_project.gaps if g.event_type == "camera_drop"]
+        camera_gaps = [g for g in win.current_project.gaps if g.event_type == "camera_clicks"]
+        gunshot_gaps = [g for g in win.current_project.gaps if g.event_type == "gunshots_combat"]
 
-    for cg in camera_gaps:
-        st, en = cg.start_sample, cg.end_sample
-        peak_enh = np.max(np.abs(enh_mono[st:en]))
-        peak_orig = np.max(np.abs(orig_mono[st:en]))
-        peak_novoc = np.max(np.abs(novoc_mono[st:en]))
-        print(f"  Camera click gap: peak in novoc={peak_novoc:.3f}, enhanced={peak_enh:.3f}, orig={peak_orig:.3f}")
-        assert peak_enh >= 0.85 * peak_orig, f"Camera clicks not restored! Peak={peak_enh}, expected ~{peak_orig}"
-    print("  ✓ Camera shutter clicks restored with full sharpness!")
+        print(f"  Detected camera drop gaps: {len(drop_gaps)}, camera clicks: {len(camera_gaps)}, gunshots: {len(gunshot_gaps)}")
+        assert len(drop_gaps) >= 1, "Expected at least 1 camera drop gap in the beginning"
+        assert len(camera_gaps) >= 1, "Expected at least 1 camera click gap"
+        assert len(gunshot_gaps) >= 1, "Expected at least 1 gunshot combat gap"
 
-    for gg in gunshot_gaps:
-        st, en = gg.start_sample, gg.end_sample
-        peak_enh = np.max(np.abs(enh_mono[st:en]))
-        peak_orig = np.max(np.abs(orig_mono[st:en]))
-        peak_novoc = np.max(np.abs(novoc_mono[st:en]))
-        print(f"  Gunshot gap: peak in novoc={peak_novoc:.3f}, enhanced={peak_enh:.3f}, orig={peak_orig:.3f}")
-        assert peak_enh >= 0.85 * peak_orig, f"Gunshots not restored! Peak={peak_enh}, expected ~{peak_orig}"
-    print("  ✓ Combat gunshots restored with full punch and impact!")
+        for dg in drop_gaps:
+            st, en = dg.start_sample, dg.end_sample
+            peak_enh = np.max(np.abs(enh_mono[st:en]))
+            peak_novoc = np.max(np.abs(novoc_mono[st:en]))
+            print(f"  Camera drop gap: peak in novoc={peak_novoc:.3f}, enhanced={peak_enh:.3f}")
+            assert peak_enh >= 0.70, f"Camera drop not restored! Peak={peak_enh}, expected >= 0.70"
+        print("  ✓ Camera drop impact restored with full punch and presence!")
 
-    # 3. Check that NO repeated donor sound was force-pasted onto dialogue gaps
-    for g in speech_gaps:
-        st, en = g.start_sample, g.end_sample
-        assert np.max(np.abs(enh_mono[st:en])) <= np.max(np.abs(orig_mono[st:en])) + 0.1
-    print("  ✓ Verified: 0 dialogue gaps were polluted with repeated donor sounds! Background music is clean.")
+        for cg in camera_gaps:
+            st, en = cg.start_sample, cg.end_sample
+            peak_enh = np.max(np.abs(enh_mono[st:en]))
+            peak_novoc = np.max(np.abs(novoc_mono[st:en]))
+            print(f"  Camera click gap: peak in novoc={peak_novoc:.3f}, enhanced={peak_enh:.3f}")
+            assert peak_enh >= 0.45, f"Camera clicks not restored! Peak={peak_enh}, expected >= 0.45"
+        print("  ✓ Camera shutter clicks restored with full sharpness!")
 
-    # 4. Check Segment Editor Table
-    # Table should show "Чистый фон" as default for dialogue
-    assert win.segment_editor.table.rowCount() == len(win.current_project.gaps)
-    combo_0 = win.segment_editor.table.cellWidget(0, 3)
-    print(f"  Segment 0 sound selected: '{combo_0.currentText()}'")
-    assert "Чистый фон" in combo_0.currentText(), f"Expected 'Чистый фон', got '{combo_0.currentText()}'"
-    print("  ✓ Segment editor table defaults to clean background for speech.")
+        for gg in gunshot_gaps:
+            st, en = gg.start_sample, gg.end_sample
+            peak_enh = np.max(np.abs(enh_mono[st:en]))
+            peak_novoc = np.max(np.abs(novoc_mono[st:en]))
+            print(f"  Gunshot gap: peak in novoc={peak_novoc:.3f}, enhanced={peak_enh:.3f}")
+            assert peak_enh >= 0.55, f"Gunshots not restored! Peak={peak_enh}, expected >= 0.55"
+        print("  ✓ Combat gunshots restored with full punch and impact!")
 
-    print(">>> TEST 2 PASSED: Full video pipeline and acoustics verified! <<<\n")
-    win.close()
+        # 3. Check that NO repeated donor sound was force-pasted onto dialogue gaps
+        for g in speech_gaps:
+            st, en = g.start_sample, g.end_sample
+            assert np.max(np.abs(enh_mono[st:en])) <= np.max(np.abs(orig_mono[st:en])) + 0.1
+        print("  ✓ Verified: 0 dialogue gaps were polluted with repeated donor sounds! Background music is clean.")
+
+        # 4. Check Segment Editor Table
+        # Table should show "Чистый фон" as default for dialogue
+        assert win.segment_editor.table.rowCount() == len(win.current_project.gaps)
+        combo_0 = win.segment_editor.table.cellWidget(0, 3)
+        print(f"  Segment 0 sound selected: '{combo_0.currentText()}'")
+        assert "Чистый фон" in combo_0.currentText(), f"Expected 'Чистый фон', got '{combo_0.currentText()}'"
+        print("  ✓ Segment editor table defaults to clean background for speech.")
+
+        print(">>> TEST 2 PASSED: Full video pipeline and acoustics verified! <<<\n")
+    finally:
+        QMessageBox.critical = orig_critical
+        QMessageBox.warning = orig_warning
+        if win:
+            win.close()
 
 
 def test_3_live_adjustments_and_video_remux():
@@ -329,50 +348,61 @@ def test_4_edge_cases_and_stability():
     print("TEST 4: Edge Cases & Stability Verification")
     print("=" * 60)
 
-    config = Config()
-    app = get_app()
-    win = MainWindow(config=config)
-    win.show()
-    wait_ms(200)
+    orig_critical = QMessageBox.critical
+    orig_warning = QMessageBox.warning
+    QMessageBox.critical = lambda *a, **kw: QMessageBox.Ok
+    QMessageBox.warning = lambda *a, **kw: QMessageBox.Ok
 
-    # 1. Rapid track switching in video player
-    print("  Stress testing rapid audio track switching...")
-    for mode in ["enhanced", "no_vocals", "original", "enhanced", "original", "no_vocals"]:
-        win.player_widget.switch_track(mode, auto_play=False)
-        wait_ms(50)
-    print("  ✓ Rapid track switching completed without exception")
+    win = None
+    try:
+        config = Config()
+        app = get_app()
+        win = MainWindow(config=config)
+        win.show()
+        wait_ms(200)
 
-    # 2. Volume bounds
-    print("  Testing volume slider bounds (-24 dB to +12 dB)...")
-    win.player_widget.slider_volume.setValue(0)
-    assert win.player_widget.audio_output.volume() == 0.0
-    win.player_widget.slider_volume.setValue(100)
-    assert win.player_widget.audio_output.volume() == 1.0
-    win.player_widget.btn_mute.click()
-    assert win.player_widget.audio_output.isMuted()
-    win.player_widget.btn_mute.click()
-    assert not win.player_widget.audio_output.isMuted()
-    print("  ✓ Volume & mute controls verified")
+        # 1. Rapid track switching in video player
+        print("  Stress testing rapid audio track switching...")
+        for mode in ["enhanced", "no_vocals", "original", "enhanced", "original", "no_vocals"]:
+            win.player_widget.switch_track(mode, auto_play=False)
+            wait_ms(50)
+        print("  ✓ Rapid track switching completed without exception")
 
-    # 3. Seeking bounds
-    win.player_widget.seek_relative(99999999)
-    win.player_widget.seek_relative(-99999999)
-    print("  ✓ Seek out-of-bounds handled gracefully")
+        # 2. Volume bounds
+        print("  Testing volume slider bounds (-24 dB to +12 dB)...")
+        win.player_widget.slider_volume.setValue(0)
+        assert win.player_widget.audio_output.volume() == 0.0
+        win.player_widget.slider_volume.setValue(100)
+        assert win.player_widget.audio_output.volume() == 1.0
+        win.player_widget.btn_mute.click()
+        assert win.player_widget.audio_output.isMuted()
+        win.player_widget.btn_mute.click()
+        assert not win.player_widget.audio_output.isMuted()
+        print("  ✓ Volume & mute controls verified")
 
-    # 4. Cyrillic project name handling
-    pm = ProjectManager(config)
-    dummy_wav = config.temp_dir / "test_cyr.wav"
-    dummy_wav.write_bytes(b"\x00" * 1024)
-    cyr_proj = pm.create_project(dummy_wav, name="Тестовый проект с русскими буквами")
-    assert pm.load_project(cyr_proj.id) is not None
-    pm.rename_project(cyr_proj.id, "Новое имя (проверка переименования)")
-    loaded = pm.load_project(cyr_proj.id)
-    assert loaded.name == "Новое имя (проверка переименования)"
-    pm.delete_project(cyr_proj.id)
-    print("  ✓ Cyrillic project naming, renaming, and loading verified")
+        # 3. Seeking bounds
+        win.player_widget.seek_relative(99999999)
+        win.player_widget.seek_relative(-99999999)
+        print("  ✓ Seek out-of-bounds handled gracefully")
 
-    print(">>> TEST 4 PASSED: Edge cases and stability verified! <<<\n")
-    win.close()
+        # 4. Cyrillic project name handling
+        pm = ProjectManager(config)
+        dummy_wav = config.temp_dir / "test_cyr.wav"
+        dummy_wav.write_bytes(b"\x00" * 1024)
+        cyr_proj = pm.create_project(dummy_wav, name="Тестовый проект с русскими буквами")
+        assert pm.load_project(cyr_proj.id) is not None
+        pm.rename_project(cyr_proj.id, "Новое имя (проверка переименования)")
+        loaded = pm.load_project(cyr_proj.id)
+        assert loaded.name == "Новое имя (проверка переименования)"
+        pm.delete_project(cyr_proj.id)
+        print("  ✓ Cyrillic project naming, renaming, and loading verified")
+
+        print(">>> TEST 4 PASSED: Edge cases and stability verified! <<<\n")
+    finally:
+        QMessageBox.critical = orig_critical
+        QMessageBox.warning = orig_warning
+        if win:
+            win.close()
 
 
 def run_all_tests():

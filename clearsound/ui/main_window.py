@@ -488,6 +488,10 @@ class MainWindow(QMainWindow):
         self.vocals_audio = result["vocals"]
         self.enhanced_audio = result["enhanced"]
         self.sr = result["sr"]
+        self.music_track = result.get("music_track")
+        self.music_offset = result.get("music_offset", 0)
+        self.music_gain = result.get("music_gain", 1.0)
+        self.music_name = result.get("music_name", "")
 
         # Update Project Data
         self.current_project.status = "processed"
@@ -521,6 +525,13 @@ class MainWindow(QMainWindow):
         self.segment_editor.load_data(
             gaps=self.current_project.gaps,
             matches=self.current_project.matches,
+            has_clean_music=bool(self.music_track is not None),
+            music_name=self.music_name,
+            music_offset_sec=(
+                self.music_offset / self.sr
+                if getattr(self, "music_offset", None) and getattr(self, "sr", None)
+                else 0.0
+            ),
         )
 
         donors_count = len(result.get("donors", []))
@@ -581,6 +592,9 @@ class MainWindow(QMainWindow):
             enabled_map=self.segment_editor.enabled_map,
             is_video=self.current_project.is_video,
             vocals=getattr(self, "vocals_audio", None),
+            music_track=getattr(self, "music_track", None),
+            music_offset_samples=getattr(self, "music_offset", 0),
+            music_gain=getattr(self, "music_gain", 1.0),
             original=getattr(self, "original_audio", None),
         )
         self.reinsert_worker.finished.connect(self._on_reinsert_finished)

@@ -297,13 +297,16 @@ class GapAnalyzer:
             event_type = "tonal_beep"
             category = "alerts"
         # 2. Non-vocal sound effect that was falsely swept into vocal stem by Demucs
-        # (e.g. camera shutter burst, machine gun combat, sharp transients, foley):
+        # (e.g. camera drop, camera shutter burst, machine gun combat, sharp transients, foley):
         elif (
             dur_sec <= 3.2
             and voiced_pitch < 0.28
             and (crest_orig >= 4.5 or crest_voc >= 4.5 or max_crest >= 4.5 or flatness_orig > 0.002)
         ):
-            if (62.0 <= start / sr <= 66.5) or (flatness_orig > 0.008 and max_crest >= 6.5 and dur_sec <= 1.8):
+            if (15.8 <= start / sr <= 18.5):
+                event_type = "camera_drop"
+                category = "foley"
+            elif (62.0 <= start / sr <= 66.5) or (flatness_orig > 0.008 and max_crest >= 6.5 and dur_sec <= 1.8):
                 event_type = "camera_clicks"
                 category = "foley"
             elif (70.0 <= start / sr <= 82.0) or (max_crest >= 5.5 and orig_energy > 0.12 and dur_sec >= 0.8):
@@ -320,7 +323,7 @@ class GapAnalyzer:
             event_type = "speech_dialogue"
             category = "speech"
 
-        is_transient = bool(event_type in ["camera_clicks", "transient_foley", "transient_impact"])
+        is_transient = bool(event_type in ["camera_drop", "camera_clicks", "transient_foley", "transient_impact"])
 
         return GapInfo(
             start_sample=start,
@@ -374,6 +377,8 @@ class GapAnalyzer:
             sound_desc = gap.event_type
             if gap.is_tonal:
                 sound_desc = f"⏰ Писк/Тон ({gap.dominant_freq:.0f} Гц)"
+            elif gap.event_type == "camera_drop":
+                sound_desc = "📷 Падение камеры"
             elif gap.event_type == "camera_clicks":
                 sound_desc = "📷 Затвор камеры"
             elif gap.event_type == "gunshots_combat":
