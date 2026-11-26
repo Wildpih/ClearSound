@@ -133,15 +133,6 @@ class SoundInserter:
                 music_track is not None and start >= music_offset_samples
             )
 
-            # Measure actual non-vocal audio energy in this gap
-            if no_vocals is not None:
-                nv_seg = no_vocals[:, start:end] if no_vocals.ndim > 1 else no_vocals[start:end]
-                novoc_rms = float(np.sqrt(np.mean(nv_seg ** 2))) if len(nv_seg) > 0 else 0.0
-            else:
-                novoc_rms = 0.0
-
-            has_background_sound = novoc_rms >= 0.002 or gap.has_overlapping_sounds
-
             # Step 1: Background reconstruction
             if has_music and music_track is not None and start >= music_offset_samples:
                 # Region has background music and clean music track is available
@@ -149,18 +140,21 @@ class SoundInserter:
                     result, start, end, fade_len, is_stereo,
                     music_track, music_offset_samples, music_gain,
                 )
-            elif has_background_sound:
-                # Region has real background sounds (typing, foley, room tone, ambience, impacts)
-                # NEVER fade to silence! Preserve no_vocals with clean crossfades.
-                if no_vocals is not None:
-                    self._crossfade_region(result, no_vocals, start, end, fade_len, is_stereo)
-                else:
-                    self._fade_to_silence(result, start, end, fade_len, is_stereo)
+            elif has_music and no_vocals is not None:
+                # Background music exists in no_vocals
+                self._crossfade_region(result, no_vocals, start, end, fade_len, is_stereo)
+            elif gap.has_overlapping_sounds and no_vocals is not None:
+                # Real physical sounds detected by neural net
+                self._crossfade_region(result, no_vocals, start, end, fade_len, is_stereo)
             else:
-                # Truly dead silent region (no music and no ambient sounds) -> fade to silence
+                # Pure speech dialogue without music -> smoothly fade to silence (no Demucs electric murmur/hiss)
                 self._fade_to_silence(result, start, end, fade_len, is_stereo)
 
             # Step 2: Layer matched discrete SFX on top (if any)
+            # Only layer discrete SFX if the neural net genuinely detected overlapping sounds
+            if not gap.has_overlapping_sounds:
+                continue
+
             gap_matches = matches.get(i, [])
             if not gap_matches:
                 continue

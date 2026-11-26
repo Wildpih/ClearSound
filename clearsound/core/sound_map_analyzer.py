@@ -266,20 +266,22 @@ class SoundMapAnalyzer:
         speech_regions = [r for r in all_human_regions if r[1] - r[0] >= 0.20]
         console.print(f"  Обнаружено сегментов с человеческими звуками: [bold]{len(speech_regions)}[/]")
 
-        # ── Step 3: Non-speech events & transient analysis ────────────
+        # ── Step 3: Non-speech events from neural network (PANNs) ──────
         raw_non_speech = [e for e in raw_events if e.category != "speech"]
 
-        # Run spectral/transient analysis on no_vocals (where speech masking is absent)
-        transient_source = no_vocals if no_vocals is not None else audio_mono
-        spectral_events = self._detect_transient_events(transient_source, sr)
-
-        for sev in spectral_events:
-            already_covered = any(
-                ev.category == sev.category and ev.overlaps_with(sev.start_sec - 0.2, sev.end_sec + 0.2)
-                for ev in raw_non_speech
-            )
-            if not already_covered:
-                raw_non_speech.append(sev)
+        # If no_vocals stem is available, also run neural PANNs on it to detect
+        # any real background sounds that were masked by loud speech
+        if no_vocals is not None:
+            nv_mono = np.mean(no_vocals, axis=0) if no_vocals.ndim > 1 else no_vocals
+            nv_events = self._detect_sound_events(nv_mono, sr)
+            for nev in nv_events:
+                if nev.category != "speech" and nev.confidence >= 0.25:
+                    already = any(
+                        ev.category == nev.category and ev.overlaps_with(nev.start_sec - 0.3, nev.end_sec + 0.3)
+                        for ev in raw_non_speech
+                    )
+                    if not already:
+                        raw_non_speech.append(nev)
 
         non_speech_events = self._deduplicate_events(raw_non_speech)
         console.print(f"  Обнаружено не-речевых звуковых событий: [bold]{len(non_speech_events)}[/]")
@@ -349,6 +351,9 @@ class SoundMapAnalyzer:
 
     def _detect_sound_events(self, audio_mono: np.ndarray, sr: int) -> List[SoundEvent]:
         """Detect sound events using PANNs SoundEventDetection on sliding windows."""
+        if audio_mono.ndim > 1:
+            audio_mono = np.mean(audio_mono, axis=0)
+
         try:
             sed = self._ensure_sed_model()
         except Exception as e:
@@ -392,22 +397,22 @@ class SoundMapAnalyzer:
                 threshold = 0.40
                 min_duration_sec = 0.25
             elif category == "music":
-                threshold = 0.42
+                threshold = 0.45
                 min_duration_sec = 0.50
             elif category == "crowd":
                 threshold = 0.35
                 min_duration_sec = 0.40
             elif category in ("gunshot", "explosion", "impact", "camera"):
-                threshold = 0.08
-                min_duration_sec = 0.04
+                threshold = 0.25
+                min_duration_sec = 0.08
             elif category in ("alert", "foley"):
-                threshold = 0.12
-                min_duration_sec = 0.05
+                threshold = 0.25
+                min_duration_sec = 0.08
             elif category == "other":
-                threshold = 0.50  # very strict for unknown categories
+                threshold = 0.40  # very strict for unknown categories
                 min_duration_sec = 0.25
             else:
-                threshold = 0.20
+                threshold = 0.30
                 min_duration_sec = 0.15
 
             class_probs = probs[:, class_idx]

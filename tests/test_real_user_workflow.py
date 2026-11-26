@@ -231,11 +231,11 @@ def test_2_real_video_pipeline_and_acoustic_verification():
             body_rms = float(np.sqrt(np.mean(body ** 2)))
 
             music_offset_s = getattr(win, "music_offset", 0) or int(31.7 * sr)
-            if nv_rms < 0.003 and not g.has_overlapping_sounds and st < music_offset_s:
+            if not g.has_overlapping_sounds and st < music_offset_s:
                 truly_quiet_count += 1
                 if body_rms < 0.001:
                     silenced_count += 1
-            elif nv_rms >= 0.003 or g.has_overlapping_sounds:
+            else:
                 bg_sound_count += 1
                 if body_rms >= 0.001:
                     preserved_bg_count += 1

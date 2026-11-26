@@ -43,7 +43,7 @@ CATEGORY_KEYWORDS: Dict[str, List[str]] = {
     "explosion":  ["explosion", "blast", "boom", "detonate", "bang"],
     "impact":     ["impact", "thump", "slam", "knock", "crash", "break", "hit", "punch", "smash"],
     "camera":     ["camera", "shutter", "click", "photo", "snap"],
-    "alert":      ["alarm", "beep", "buzzer", "ring", "alert", "siren", "tone", "chime"],
+    "alert":      ["alarm", "beep", "buzzer", "ring", "alert", "siren", "chime"],
     "crowd":      ["crowd", "cheer", "applause", "chatter"],
     "vehicle":    ["car", "engine", "motor", "truck", "vehicle", "drive"],
     "nature":     ["wind", "rain", "thunder", "water", "ocean", "storm"],
@@ -116,13 +116,27 @@ class SoundMatcher:
 
         # Target the highest-confidence discrete SFX event
         target_sfx = max(sfx_events, key=lambda e: e.confidence)
+
+        # Require genuine neural confidence (>= 0.25) for inserting discrete SFX
+        if target_sfx.confidence < 0.25:
+            return []
+
         target_cat = target_sfx.category
         target_kw = CATEGORY_KEYWORDS.get(target_cat, [])
         donor_paths = {str(d.path) for d in donors}
 
         for sound in sounds:
+            cat_lower = sound.category.lower()
+            name_lower = sound.name.lower()
+
+            # Ambient noise / tone files must NEVER be inserted as discrete SFX!
+            if cat_lower in ("ambient", "noise") or any(
+                w in name_lower for w in ["white_noise", "pink_noise", "brown_noise", "room_tone", "drone", "pad"]
+            ):
+                continue
+
             # Never insert background music tracks as discrete SFX
-            if sound.category.lower() == "music" and target_cat != "music":
+            if cat_lower == "music" and target_cat != "music":
                 continue
 
             key = str(sound.path)
@@ -130,8 +144,6 @@ class SoundMatcher:
                 continue
 
             is_donor = key in donor_paths
-            name_lower = sound.name.lower()
-            cat_lower = sound.category.lower()
 
             # Category/keyword match
             kw_match = any(kw in name_lower for kw in target_kw)
@@ -166,7 +178,7 @@ class SoundMatcher:
 
             rec_vol = self._recommend_volume(gap)
 
-            if sim >= 0.15:
+            if sim >= 0.50:
                 candidates.append(MatchResult(
                     sound=sound, similarity_score=sim,
                     category_match=cat_match or kw_match,
