@@ -1,9 +1,7 @@
-"""Gap analyzer — finds regions where voice was present and the resulting
-audio sounds degraded or hollow after vocal removal.
+"""Gap analyzer — Integrates neural sound map to identify regions
+where voice was present and what other sounds exist alongside it.
 
-Compares the original audio with the vocal-removed version to identify
-segments that need sound restoration, and characterizes the spectral
-profile of each gap for later matching.
+No hardcoded timestamps. Uses SoundMapAnalyzer for universal detection.
 """
 
 from __future__ import annotations
@@ -11,27 +9,21 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import List, Optional, Tuple
 
-import librosa
 import numpy as np
 from rich.console import Console
 from rich.table import Table
-from scipy.signal import fftconvolve
 
 from clearsound.config import Config
 from clearsound.core.audio_utils import (
-    amplitude_to_db,
-    compute_crest_factor,
-    compute_dominant_frequency,
     compute_mfcc,
     compute_rms_energy,
     compute_spectral_centroid,
     compute_spectral_envelope,
-    compute_spectral_flatness,
-    compute_tonal_signature,
     format_time,
     samples_to_seconds,
     seconds_to_samples,
 )
+from clearsound.core.sound_map_analyzer import SoundEvent, SoundMapAnalyzer, classify_label, CATEGORY_ICONS
 
 console = Console()
 
@@ -40,7 +32,6 @@ console = Console()
 class GapInfo:
     """Description of a single gap (region where voice was present)."""
 
-    # Start and end in samples
     start_sample: int
     end_sample: int
     sample_rate: int
@@ -51,19 +42,27 @@ class GapInfo:
     avg_rms: float = 0.0
     spectral_centroid: float = 0.0
 
-    # Category hint inferred from the surrounding audio
+    # Category hint — now populated by neural network, NOT hardcoded
     category_hint: str = ""
 
-    # How much energy was lost (ratio of energy in no-vocals vs original)
+    # Energy loss ratio (original vs no-vocals)
     energy_loss_ratio: float = 0.0
 
-    # Specific acoustic event properties (for beeps, alarms, transients, etc.)
+    # Acoustic properties
     dominant_freq: float = 0.0
     tonality: float = 0.0
     is_tonal: bool = False
     is_transient: bool = False
     voiced_pitch: float = 0.0
-    event_type: str = "ambient_diffuse"  # "tonal_beep", "transient_foley", "harmonic_music", "ambient_diffuse"
+
+    # Neural network classification — replaces all hardcoded event types
+    event_type: str = "speech_dialogue"
+    neural_label: str = ""           # AudioSet label from PANNs
+    neural_category: str = ""        # High-level category
+    neural_confidence: float = 0.0   # Detection confidence
+
+    # Overlapping non-speech sounds detected by neural net in this region
+    overlapping_events: List[SoundEvent] = field(default_factory=list)
 
     @property
     def start_sec(self) -> float:
@@ -81,13 +80,19 @@ class GapInfo:
     def duration_samples(self) -> int:
         return self.end_sample - self.start_sample
 
+    @property
+    def has_overlapping_sounds(self) -> bool:
+        """True if non-speech sounds exist in this speech region."""
+        return len(self.overlapping_events) > 0
+
 
 class GapAnalyzer:
-    """Analyze the vocal track to find gaps where the sound field needs
-    restoration."""
+    """Analyze audio to find speech regions and characterize what sounds
+    overlap with them, using neural network detection."""
 
     def __init__(self, config: Config):
         self.config = config
+        self._sound_map_analyzer = SoundMapAnalyzer()
 
     def analyze(
         self,
@@ -95,305 +100,145 @@ class GapAnalyzer:
         no_vocals: np.ndarray,
         vocals: np.ndarray,
         sr: int,
-    ) -> List[GapInfo]:
-        """Find and characterize gaps.
-
-        Args:
-            original: Original audio (channels, samples) or (samples,).
-            no_vocals: Audio without vocals (channels, samples) or (samples,).
-            vocals: Vocal stem (channels, samples) or (samples,).
-            sr: Sample rate.
+        callback=None,
+    ) -> Tuple[List[GapInfo], List[SoundEvent], List[Tuple[float, float]]]:
+        """Find and characterize gaps using neural sound map.
 
         Returns:
-            Sorted list of GapInfo objects.
+            (gaps, sound_events, speech_regions)
         """
-        console.print("\n[bold cyan]🔍 Анализируем аудио на наличие голосовых сегментов...[/]")
-
-        # Work in mono for analysis
         orig_mono = self._to_mono(original)
         novoc_mono = self._to_mono(no_vocals)
-        voc_mono = self._to_mono(vocals)
 
-        # ── Step 1: Detect where vocals are present ───────────────────
-        vocal_regions = self._detect_vocal_regions(voc_mono, sr)
-        console.print(f"  Найдено голосовых сегментов: [bold]{len(vocal_regions)}[/]")
+        # ── Step 1: Neural sound map on ORIGINAL audio ────────────────
+        sound_events, speech_regions = self._sound_map_analyzer.analyze(
+            original, sr, callback=callback,
+        )
 
-        if not vocal_regions:
-            console.print("[yellow]  Голосовые сегменты не обнаружены.[/]")
-            return []
+        # ── Step 2: Merge close speech regions ────────────────────────
+        merged_speech = self._merge_regions(speech_regions, sr)
+        console.print(f"  После объединения: [bold]{len(merged_speech)}[/]")
 
-        # ── Step 2: Merge close regions and filter short ones ─────────
-        merged = self._merge_regions(vocal_regions, sr)
-        console.print(f"  После объединения близких: [bold]{len(merged)}[/]")
-
-        # ── Step 3: Characterize each gap ─────────────────────────────
+        # ── Step 3: Create GapInfo for each speech region ─────────────
         gaps: List[GapInfo] = []
-        for start, end in merged:
+        for start_sec, end_sec in merged_speech:
+            start_sample = max(0, seconds_to_samples(start_sec, sr))
+            end_sample = min(len(orig_mono), seconds_to_samples(end_sec, sr))
+
+            if end_sample - start_sample < seconds_to_samples(self.config.min_gap_duration, sr):
+                continue
+
             gap = self._characterize_gap(
-                start, end, orig_mono, novoc_mono, sr, voc_mono=voc_mono
+                start_sample, end_sample, orig_mono, novoc_mono, sr, sound_events,
             )
             if gap is not None:
                 gaps.append(gap)
 
-        console.print(f"  Сегментов для восстановления: [bold]{len(gaps)}[/]")
-
-        # ── Display summary table ─────────────────────────────────────
+        console.print(f"  Сегментов для обработки: [bold]{len(gaps)}[/]")
         if gaps:
             self._print_summary(gaps)
 
-        return gaps
+        return gaps, sound_events, speech_regions
 
-    def _to_mono(self, audio: np.ndarray) -> np.ndarray:
-        if audio.ndim > 1:
-            return np.mean(audio, axis=0)
-        return audio
+    def _to_mono(self, audio):
+        return np.mean(audio, axis=0) if audio.ndim > 1 else audio
 
-    def _detect_vocal_regions(
-        self, vocals_mono: np.ndarray, sr: int
-    ) -> List[Tuple[int, int]]:
-        """Detect time regions where vocal energy is significant."""
-        frame_length = self.config.analysis_frame_length
-        hop_length = self.config.analysis_hop_length
-
-        rms = compute_rms_energy(vocals_mono, frame_length, hop_length)
-
-        # Dynamic threshold: use a fraction of the maximum vocal energy
-        max_rms = np.max(rms) if len(rms) > 0 else 0
-        if max_rms < 1e-8:
-            return []
-
-        threshold_db = self.config.vocal_energy_threshold_db
-        threshold = max_rms * (10 ** (threshold_db / 20.0))
-
-        # Find frames above threshold
-        active_frames = rms > threshold
-
-        # Convert frame indices to sample ranges
-        regions: List[Tuple[int, int]] = []
-        in_region = False
-        region_start = 0
-
-        for i, is_active in enumerate(active_frames):
-            if is_active and not in_region:
-                region_start = i * hop_length
-                in_region = True
-            elif not is_active and in_region:
-                region_end = i * hop_length + frame_length
-                region_end = min(region_end, len(vocals_mono))
-                regions.append((region_start, region_end))
-                in_region = False
-
-        if in_region:
-            regions.append((region_start, len(vocals_mono)))
-
-        return regions
-
-    def _merge_regions(
-        self, regions: List[Tuple[int, int]], sr: int
-    ) -> List[Tuple[int, int]]:
-        """Merge regions that are close together and filter short ones."""
+    def _merge_regions(self, regions, sr):
         if not regions:
             return []
-
-        min_gap_samples = seconds_to_samples(
-            self.config.min_gap_duration, sr
-        )
-        # Merge regions closer than 0.15s
-        merge_dist = seconds_to_samples(0.15, sr)
-
-        merged: List[Tuple[int, int]] = [regions[0]]
-        for start, end in regions[1:]:
-            prev_start, prev_end = merged[-1]
-            if start - prev_end < merge_dist:
-                merged[-1] = (prev_start, max(prev_end, end))
+        merge_gap = 0.15
+        s = sorted(regions, key=lambda r: r[0])
+        merged = [s[0]]
+        for start, end in s[1:]:
+            ps, pe = merged[-1]
+            if start - pe < merge_gap:
+                merged[-1] = (ps, max(pe, end))
             else:
                 merged.append((start, end))
+        min_dur = self.config.min_gap_duration
+        return [(s, e) for s, e in merged if e - s >= min_dur]
 
-        # Filter out regions shorter than minimum
-        return [
-            (s, e) for s, e in merged
-            if (e - s) >= min_gap_samples
-        ]
+    def _characterize_gap(self, start, end, orig_mono, novoc_mono, sr, sound_events):
+        ctx_samples = seconds_to_samples(1.0, sr)
+        ctx_start = max(0, start - ctx_samples)
+        ctx_end = min(len(novoc_mono), end + ctx_samples)
 
-    def _characterize_gap(
-        self,
-        start: int,
-        end: int,
-        orig_mono: np.ndarray,
-        novoc_mono: np.ndarray,
-        sr: int,
-        voc_mono: Optional[np.ndarray] = None,
-    ) -> GapInfo | None:
-        """Compute the spectral fingerprint and energy profile for a gap."""
-
-        # Get surrounding context for spectral matching
-        context_samples = seconds_to_samples(1.0, sr)
-        ctx_start = max(0, start - context_samples)
-        ctx_end = min(len(novoc_mono), end + context_samples)
-
-        # Surrounding non-vocal audio (before + after the gap)
         before = novoc_mono[ctx_start:start]
         after = novoc_mono[end:ctx_end]
-        context_audio = np.concatenate([before, after]) if len(before) + len(after) > 0 else novoc_mono[start:end]
+        ctx_audio = np.concatenate([before, after]) if len(before) + len(after) > 0 else novoc_mono[start:end]
 
-        if len(context_audio) < 1024:
+        if len(ctx_audio) < 1024:
             return None
 
-        # Compute spectral features of the surrounding audio
-        mfcc = compute_mfcc(context_audio, sr, n_mfcc=self.config.n_mfcc)
+        mfcc = compute_mfcc(ctx_audio, sr, n_mfcc=self.config.n_mfcc)
         mfcc_mean = np.mean(mfcc, axis=1)
-
-        freqs, spec_env = compute_spectral_envelope(context_audio, sr)
-
-        rms_context = compute_rms_energy(context_audio)
-        avg_rms = float(np.mean(rms_context)) if len(rms_context) > 0 else 0.0
-
-        centroid = compute_spectral_centroid(context_audio, sr)
+        freqs, spec_env = compute_spectral_envelope(ctx_audio, sr)
+        rms = compute_rms_energy(ctx_audio)
+        avg_rms = float(np.mean(rms)) if len(rms) > 0 else 0.0
+        centroid = compute_spectral_centroid(ctx_audio, sr)
         avg_centroid = float(np.mean(centroid)) if len(centroid) > 0 else 0.0
 
-        # Compute energy loss
-        orig_segment = orig_mono[start:end]
-        novoc_segment = novoc_mono[start:end]
-        orig_energy = np.sqrt(np.mean(orig_segment ** 2)) if len(orig_segment) > 0 else 0
-        novoc_energy = np.sqrt(np.mean(novoc_segment ** 2)) if len(novoc_segment) > 0 else 0
-        energy_loss = 1.0 - (novoc_energy / max(orig_energy, 1e-10))
+        orig_seg = orig_mono[start:end]
+        novoc_seg = novoc_mono[start:end]
+        orig_e = np.sqrt(np.mean(orig_seg ** 2)) if len(orig_seg) > 0 else 0
+        novoc_e = np.sqrt(np.mean(novoc_seg ** 2)) if len(novoc_seg) > 0 else 0
+        energy_loss = 1.0 - (novoc_e / max(orig_e, 1e-10))
 
-        # Acoustic event analysis inside the gap
-        dur_sec = (end - start) / sr
-        dom_freq_novoc, peak_ratio_novoc, is_tonal_novoc = compute_tonal_signature(novoc_segment, sr, min_freq=450.0)
-        dom_freq_orig, peak_ratio_orig, is_tonal_orig = compute_tonal_signature(orig_segment, sr, min_freq=450.0)
+        # Find overlapping non-speech sound events
+        gap_start_sec = start / sr
+        gap_end_sec = end / sr
+        overlapping = [
+            ev for ev in sound_events
+            if ev.overlaps_with(gap_start_sec, gap_end_sec) and ev.category != "speech"
+        ]
 
-        flatness_novoc = compute_spectral_flatness(novoc_segment)
-        flatness_orig = compute_spectral_flatness(orig_segment)
-        tonality_novoc = float(np.clip(1.0 - flatness_novoc, 0.0, 1.0))
-        tonality_orig = float(np.clip(1.0 - flatness_orig, 0.0, 1.0))
-        crest_novoc = compute_crest_factor(novoc_segment)
-        crest_orig = compute_crest_factor(orig_segment)
-        max_crest = max(crest_novoc, crest_orig)
-
-        is_tonal = is_tonal_novoc or is_tonal_orig
-        dom_freq = dom_freq_novoc if is_tonal_novoc else dom_freq_orig
-        tonality = tonality_novoc if is_tonal_novoc else tonality_orig
-
-        # Voiced pitch analysis via autocorrelation on vocal stem:
-        if voc_mono is not None and len(voc_mono) >= end:
-            voc_segment = voc_mono[start:end]
-            crest_voc = compute_crest_factor(voc_segment)
-            min_lag = int(sr / 350)
-            max_lag = int(sr / 80)
-            if len(voc_segment) > max_lag * 2:
-                c = fftconvolve(voc_segment, voc_segment[::-1], mode="full")
-                c = c[len(c) // 2 :]
-                voiced_pitch = float(np.max(c[min_lag:max_lag]) / (c[0] + 1e-9))
+        if overlapping:
+            # Prioritize discrete SFX (gunshots, impacts, camera clicks, etc.) over continuous music
+            sfx = [e for e in overlapping if e.category not in ("music", "speech")]
+            if sfx:
+                best = max(sfx, key=lambda e: e.confidence)
             else:
-                voiced_pitch = 0.0
+                best = max(overlapping, key=lambda e: e.confidence)
+            event_type = best.category
+            neural_label = best.label
+            neural_category = best.category
+            neural_confidence = best.confidence
+            category_hint = best.category
         else:
-            crest_voc = 0.0
-            voiced_pitch = 0.0
-
-        # Physical acoustic classification:
-        s_sec = start / sr
-        e_sec = end / sr
-
-        # 1. Tonal alert (alarm clock beep, timer, phone ring):
-        if is_tonal and dom_freq >= 300.0:
-            event_type = "tonal_beep"
-            category = "alerts"
-        # 2. Camera drop physical impact:
-        elif 15.8 <= s_sec <= 18.1:
-            event_type = "camera_drop"
-            category = "foley"
-        # 3. Camera shutter clicks:
-        elif 62.5 <= s_sec <= 65.5:
-            event_type = "camera_clicks"
-            category = "foley"
-        # 4. Gunfire and combat bursts:
-        elif (71.0 <= s_sec <= 73.8) or (78.5 <= s_sec <= 80.2) or (81.5 <= s_sec <= 84.5):
-            event_type = "gunshots_combat"
-            category = "impacts"
-        # 5. Genuine isolated short loud transients with zero voice:
-        elif dur_sec <= 0.4 and voiced_pitch < 0.10 and max_crest >= 8.0:
-            event_type = "transient_impact"
-            category = "impacts"
-        else:
-            # Standard speech dialogue where vocals were removed
             event_type = "speech_dialogue"
-            category = "speech"
-
-        is_transient = bool(event_type in ["camera_drop", "camera_clicks", "transient_foley", "transient_impact"])
+            neural_label = ""
+            neural_category = "speech"
+            neural_confidence = 0.0
+            category_hint = "speech"
 
         return GapInfo(
-            start_sample=start,
-            end_sample=end,
-            sample_rate=sr,
-            mfcc_profile=mfcc_mean,
-            spectral_envelope=spec_env,
-            avg_rms=avg_rms,
-            spectral_centroid=avg_centroid,
-            energy_loss_ratio=energy_loss,
-            category_hint=category,
-            dominant_freq=dom_freq,
-            tonality=tonality,
-            is_tonal=is_tonal,
-            is_transient=is_transient,
-            voiced_pitch=voiced_pitch,
-            event_type=event_type,
+            start_sample=start, end_sample=end, sample_rate=sr,
+            mfcc_profile=mfcc_mean, spectral_envelope=spec_env,
+            avg_rms=avg_rms, spectral_centroid=avg_centroid,
+            energy_loss_ratio=energy_loss, category_hint=category_hint,
+            event_type=event_type, neural_label=neural_label,
+            neural_category=neural_category, neural_confidence=neural_confidence,
+            overlapping_events=overlapping,
         )
 
-    def _infer_category(self, centroid: float, rms: float, sr: int) -> str:
-        """Rough heuristic to guess the type of sound environment."""
-        # Low centroid + low energy → ambient / nature
-        # High centroid + high energy → music / urban
-        # Medium → foley / general
-
-        if centroid < 1500:
-            if rms < 0.02:
-                return "ambient"
-            return "nature"
-        elif centroid < 3500:
-            if rms > 0.05:
-                return "music"
-            return "foley"
-        else:
-            if rms > 0.03:
-                return "urban"
-            return "foley"
-
-    def _print_summary(self, gaps: List[GapInfo]) -> None:
-        """Print a summary table of detected gaps."""
-        table = Table(title="Обнаруженные голосовые сегменты")
+    def _print_summary(self, gaps):
+        table = Table(title="Речевые сегменты (нейросетевая классификация)")
         table.add_column("#", style="dim", width=4)
         table.add_column("Начало", style="cyan")
         table.add_column("Конец", style="cyan")
-        table.add_column("Длительность", style="green")
-        table.add_column("Потеря энергии", style="yellow")
-        table.add_column("Категория", style="magenta")
-        table.add_column("Тип звука", style="bold cyan")
+        table.add_column("Длит.", style="green")
+        table.add_column("Потеря", style="yellow")
+        table.add_column("Звуки на фоне", style="bold cyan")
 
         for i, gap in enumerate(gaps, 1):
-            sound_desc = gap.event_type
-            if gap.is_tonal:
-                sound_desc = f"⏰ Писк/Тон ({gap.dominant_freq:.0f} Гц)"
-            elif gap.event_type == "camera_drop":
-                sound_desc = "📷 Падение камеры"
-            elif gap.event_type == "camera_clicks":
-                sound_desc = "📷 Затвор камеры"
-            elif gap.event_type == "gunshots_combat":
-                sound_desc = "💥 Выстрелы/Бой"
-            elif gap.event_type in ["explosive_blast", "transient_impact"] or gap.category_hint == "impacts":
-                sound_desc = "💥 Взрыв/Выстрел" if gap.event_type == "explosive_blast" else "💥 Удар/Импульс"
-            elif gap.is_transient or gap.event_type == "transient_foley":
-                sound_desc = "🎬 Фоли/Шум"
-            elif gap.event_type == "speech_dialogue":
-                sound_desc = "🗣️ Речь/Диалог"
+            if gap.has_overlapping_sounds:
+                icons = " ".join(set(ev.icon for ev in gap.overlapping_events))
+                labels = ", ".join(set(ev.label for ev in gap.overlapping_events[:3]))
+                bg_str = f"{icons} {labels}"
+            else:
+                bg_str = "🔇 Только речь"
             table.add_row(
-                str(i),
-                format_time(gap.start_sec),
-                format_time(gap.end_sec),
-                f"{gap.duration_sec:.2f}с",
-                f"{gap.energy_loss_ratio:.0%}",
-                gap.category_hint,
-                sound_desc,
+                str(i), format_time(gap.start_sec), format_time(gap.end_sec),
+                f"{gap.duration_sec:.2f}с", f"{gap.energy_loss_ratio:.0%}", bg_str,
             )
-
         console.print(table)

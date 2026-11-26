@@ -28,19 +28,24 @@ from clearsound.core.gap_analyzer import GapInfo
 from clearsound.core.sound_matcher import MatchResult
 from clearsound.library.sound_library import SoundLibrary
 
+# Neural category → badge (text, style).  Keys are the high-level
+# category strings produced by SoundMapAnalyzer.classify_label().
 CATEGORY_BADGES = {
-    "alerts": ("⏰ Alerts", "background-color: #3f2504; color: #facc15; border: 1px solid #eab308; font-weight: bold; border-radius: 4px; padding: 2px 6px;"),
-    "donor": ("🎯 Donor", "background-color: #052e16; color: #4ade80; border: 1px solid #22c55e; font-weight: bold; border-radius: 4px; padding: 2px 6px;"),
-    "impacts": ("💥 Impacts", "background-color: #450a0a; color: #f87171; border: 1px solid #ef4444; font-weight: bold; border-radius: 4px; padding: 2px 6px;"),
-    "speech": ("🗣️ Речь", "background-color: #172554; color: #60a5fa; border: 1px solid #3b82f6; font-weight: bold; border-radius: 4px; padding: 2px 6px;"),
-    "camera_drop": ("📷 Падение", "background-color: #083344; color: #67e8f9; border: 1px solid #06b6d4; font-weight: bold; border-radius: 4px; padding: 2px 6px;"),
-    "camera_clicks": ("📷 Затвор", "background-color: #2e1065; color: #d8b4fe; border: 1px solid #a855f7; font-weight: bold; border-radius: 4px; padding: 2px 6px;"),
-    "gunshots_combat": ("💥 Выстрел", "background-color: #450a0a; color: #fca5a5; border: 1px solid #ef4444; font-weight: bold; border-radius: 4px; padding: 2px 6px;"),
-    "ambient": ("🌊 Ambient", "background-color: #0b2d2a; color: #00f0cf; border: 1px solid #00d2b4; font-weight: bold; border-radius: 4px; padding: 2px 6px;"),
-    "nature": ("🍃 Nature", "background-color: #0e3020; color: #34d399; border: 1px solid #10b981; font-weight: bold; border-radius: 4px; padding: 2px 6px;"),
-    "music": ("🎵 Music", "background-color: #261942; color: #c4b5fd; border: 1px solid #8b5cf6; font-weight: bold; border-radius: 4px; padding: 2px 6px;"),
-    "urban": ("🏙️ Urban", "background-color: #3b280c; color: #fcd34d; border: 1px solid #f59e0b; font-weight: bold; border-radius: 4px; padding: 2px 6px;"),
-    "foley": ("🔨 Foley", "background-color: #381228; color: #f472b6; border: 1px solid #ec4899; font-weight: bold; border-radius: 4px; padding: 2px 6px;"),
+    "speech":    ("🗣️ Речь",     "background-color: #172554; color: #60a5fa; border: 1px solid #3b82f6; font-weight: bold; border-radius: 4px; padding: 2px 6px;"),
+    "music":     ("🎵 Музыка",   "background-color: #261942; color: #c4b5fd; border: 1px solid #8b5cf6; font-weight: bold; border-radius: 4px; padding: 2px 6px;"),
+    "gunshot":   ("🔫 Выстрел",  "background-color: #450a0a; color: #fca5a5; border: 1px solid #ef4444; font-weight: bold; border-radius: 4px; padding: 2px 6px;"),
+    "explosion": ("💥 Взрыв",    "background-color: #450a0a; color: #f87171; border: 1px solid #ef4444; font-weight: bold; border-radius: 4px; padding: 2px 6px;"),
+    "impact":    ("💢 Удар",     "background-color: #450a0a; color: #fb923c; border: 1px solid #f97316; font-weight: bold; border-radius: 4px; padding: 2px 6px;"),
+    "camera":    ("📷 Камера",   "background-color: #083344; color: #67e8f9; border: 1px solid #06b6d4; font-weight: bold; border-radius: 4px; padding: 2px 6px;"),
+    "crowd":     ("👥 Толпа",    "background-color: #3b280c; color: #fcd34d; border: 1px solid #f59e0b; font-weight: bold; border-radius: 4px; padding: 2px 6px;"),
+    "alert":     ("⏰ Сигнал",   "background-color: #3f2504; color: #facc15; border: 1px solid #eab308; font-weight: bold; border-radius: 4px; padding: 2px 6px;"),
+    "vehicle":   ("🚗 Транспорт","background-color: #1a1a2e; color: #a5b4fc; border: 1px solid #818cf8; font-weight: bold; border-radius: 4px; padding: 2px 6px;"),
+    "nature":    ("🌧️ Природа",  "background-color: #0e3020; color: #34d399; border: 1px solid #10b981; font-weight: bold; border-radius: 4px; padding: 2px 6px;"),
+    "animal":    ("🐾 Животное", "background-color: #3b1c0e; color: #fdba74; border: 1px solid #fb923c; font-weight: bold; border-radius: 4px; padding: 2px 6px;"),
+    "foley":     ("🎬 Фоли",    "background-color: #381228; color: #f472b6; border: 1px solid #ec4899; font-weight: bold; border-radius: 4px; padding: 2px 6px;"),
+    "other":     ("🔊 Другое",  "background-color: #1e293b; color: #94a3b8; border: 1px solid #64748b; font-weight: bold; border-radius: 4px; padding: 2px 6px;"),
+    # Legacy / special
+    "speech_dialogue": ("🗣️ Речь", "background-color: #172554; color: #60a5fa; border: 1px solid #3b82f6; font-weight: bold; border-radius: 4px; padding: 2px 6px;"),
 }
 
 
@@ -181,16 +186,11 @@ class SegmentEditorWidget(QWidget):
             item_time.setFlags(Qt.ItemIsEnabled | Qt.ItemIsSelectable)
             self.table.setItem(i, 1, item_time)
 
-            # Column 2: Category badge
-            if gap.event_type in CATEGORY_BADGES:
-                cat_name = gap.event_type
-            elif gap.event_type == "speech_dialogue":
-                cat_name = "speech"
-            elif gap.is_tonal:
-                cat_name = "alerts"
-            else:
-                cat_name = gap.category_hint.lower()
-            badge_text, badge_style = CATEGORY_BADGES.get(cat_name, (gap.category_hint, "color: #ffffff;"))
+            # Column 2: Category badge — use neural category
+            cat_name = gap.neural_category or gap.event_type or gap.category_hint or "other"
+            if cat_name not in CATEGORY_BADGES:
+                cat_name = gap.event_type if gap.event_type in CATEGORY_BADGES else "other"
+            badge_text, badge_style = CATEGORY_BADGES.get(cat_name, ("🔊 " + cat_name, "color: #ffffff;"))
             lbl_cat = QLabel(badge_text)
             lbl_cat.setStyleSheet(badge_style)
             lbl_cat.setAlignment(Qt.AlignCenter)
@@ -208,28 +208,23 @@ class SegmentEditorWidget(QWidget):
             )
             gap_matches = self.matches.get(i, [])
 
-            # Option items based on acoustic category:
-            if gap.event_type == "camera_drop":
-                combo_sound.addItem("📷 Падение камеры [Foley Impact]", "camera_drop_impact")
+            # Option items — driven by neural analysis, NOT hardcoded event types
+            if gap.has_overlapping_sounds:
+                # Has overlapping sounds — show the neural label as default
+                from clearsound.core.sound_map_analyzer import CATEGORY_ICONS
+                for ov_ev in gap.overlapping_events[:3]:
+                    icon = CATEGORY_ICONS.get(ov_ev.category, "🔊")
+                    combo_sound.addItem(
+                        f"{icon} {ov_ev.label} [{ov_ev.confidence:.0%}]",
+                        f"__neural_{ov_ev.category}__",
+                    )
                 combo_sound.addItem("🔇 Чистый фон (без звука)", "__none__")
-            elif gap.event_type == "camera_clicks":
-                combo_sound.addItem("📷 Затвор камеры [Серия кадров]", "camera_shutter_burst")
-                combo_sound.addItem("📷 Затвор камеры [Одиночный]", "camera_shutter_single")
-                combo_sound.addItem("🔇 Чистый фон (без звука)", "__none__")
-            elif gap.event_type == "gunshots_combat":
-                combo_sound.addItem("💥 Очередь боя [Винтовка]", "gunshot_combat_rifle")
-                combo_sound.addItem("💥 Выстрел из пистолета", "gunshot_pistol_m1911")
-                combo_sound.addItem("🔇 Чистый фон (без звука)", "__none__")
-            elif gap.is_tonal:
-                combo_sound.addItem("⏰ Цифровой будильник / таймер", "alarm_beep_digital")
-                combo_sound.addItem("🔇 Чистый фон (без звука)", "__none__")
-            elif gap.event_type == "speech_dialogue":
+            elif gap.event_type == "speech_dialogue" or not gap.has_overlapping_sounds:
+                # Pure speech — silence or clean music
                 gap_has_music = has_clean_music and (gap.end_sec >= music_offset_sec)
                 if gap_has_music:
                     label = f"🎵 Чистая музыка ({music_name})" if music_name else "🎵 Чистая музыка [без голоса]"
                     combo_sound.addItem(label, "__clean_music__")
-                combo_sound.addItem("🔇 Чистый фон (без звука)", "__none__")
-            else:
                 combo_sound.addItem("🔇 Чистый фон (без звука)", "__none__")
 
             # Add match recommendations
@@ -375,7 +370,7 @@ class SegmentEditorWidget(QWidget):
                 combo.setCurrentIndex(0)
                 return
         elif data:
-            if data in ["__clean_music__", "__none__", "camera_drop_impact", "camera_shutter_burst", "camera_shutter_single", "gunshot_combat_rifle", "gunshot_pistol_m1911", "alarm_beep_digital"]:
+            if data in ["__clean_music__", "__none__"] or (data and data.startswith("__neural_")):
                 self.sound_overrides[row] = data
             else:
                 self.sound_overrides[row] = Path(data)

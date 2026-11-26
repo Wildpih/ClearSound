@@ -1,29 +1,26 @@
-"""Sound matcher — searches the sound library for the best-fitting
-replacement sounds to fill gaps left by vocal removal.
+"""Sound matcher — searches the sound library for replacement sounds
+using neural network labels and spectral similarity.
 
-Uses spectral similarity (MFCC cosine distance) and category hints
-to rank candidates.
+No hardcoded sound names or timestamp-based matching.
+Uses AudioSet labels from the neural sound map to find appropriate
+library sounds.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional
 
 import numpy as np
 from rich.console import Console
-from rich.progress import BarColumn, Progress, TextColumn, TimeRemainingColumn
+from rich.progress import BarColumn, Progress, TextColumn
 from sklearn.metrics.pairwise import cosine_similarity
 
 from clearsound.config import Config
-from clearsound.core.audio_utils import (
-    compute_dominant_frequency,
-    compute_mfcc,
-    compute_spectral_envelope,
-    load_audio,
-)
+from clearsound.core.audio_utils import compute_mfcc, load_audio
 from clearsound.core.donor_extractor import DonorSound
 from clearsound.core.gap_analyzer import GapInfo
+from clearsound.core.sound_map_analyzer import classify_label, CATEGORY_ICONS
 from clearsound.library.sound_library import SoundEntry, SoundLibrary
 
 console = Console()
@@ -32,17 +29,32 @@ console = Console()
 @dataclass
 class MatchResult:
     """A ranked candidate sound for a specific gap."""
-
     sound: SoundEntry
-    similarity_score: float          # 0-1, higher is better
-    category_match: bool             # does the category hint match?
-    spectral_distance: float         # lower is better
-    recommended_volume_db: float     # suggested volume adjustment
-    is_donor: bool = False           # was extracted from the audio track itself
+    similarity_score: float
+    category_match: bool
+    spectral_distance: float
+    recommended_volume_db: float
+    is_donor: bool = False
+
+
+# Maps neural categories to keywords to search in library sound names.
+CATEGORY_KEYWORDS: Dict[str, List[str]] = {
+    "gunshot":    ["gunshot", "gun", "rifle", "pistol", "shotgun", "fire", "shoot"],
+    "explosion":  ["explosion", "blast", "boom", "detonate", "bang"],
+    "impact":     ["impact", "thump", "slam", "knock", "crash", "break", "hit", "punch", "smash"],
+    "camera":     ["camera", "shutter", "click", "photo", "snap"],
+    "alert":      ["alarm", "beep", "buzzer", "ring", "alert", "siren", "tone", "chime"],
+    "crowd":      ["crowd", "cheer", "applause", "chatter"],
+    "vehicle":    ["car", "engine", "motor", "truck", "vehicle", "drive"],
+    "nature":     ["wind", "rain", "thunder", "water", "ocean", "storm"],
+    "animal":     ["dog", "cat", "bird", "animal", "bark", "meow"],
+    "foley":      ["footstep", "door", "creak", "step", "walk", "key", "type"],
+    "music":      ["music", "melody", "instrument", "piano", "guitar", "drum", "orchestra"],
+}
 
 
 class SoundMatcher:
-    """Find sounds from donors and library that best match each gap's acoustic profile."""
+    """Find sounds from library that match each gap's neural classification."""
 
     def __init__(self, config: Config, library: SoundLibrary):
         self.config = config
@@ -54,207 +66,120 @@ class SoundMatcher:
         gaps: List[GapInfo],
         donors: Optional[List[DonorSound]] = None,
     ) -> Dict[int, List[MatchResult]]:
-        """Find the best matching sounds for each gap, prioritizing clean track donors.
-
-        Args:
-            gaps: List of GapInfo from the analyzer.
-            donors: Optional list of clean sound donors extracted from the track.
-
-        Returns:
-            Dictionary mapping gap index → sorted list of MatchResult (best first).
-        """
-        console.print("\n[bold cyan]🔎 Ищем подходящие звуки (доноры из ролика + библиотека)...[/]")
+        console.print("\n[bold cyan]🔎 Подбираем звуки по нейросетевым меткам...[/]")
 
         all_sounds = list(self.library.list_all())
         donor_entries = [d.to_sound_entry() for d in (donors or [])]
-        combined_sounds = donor_entries + all_sounds
+        combined = donor_entries + all_sounds
 
-        if not combined_sounds:
-            console.print("[bold red]❌ Нет доступных звуков для восстановления![/]")
+        if not combined:
+            console.print("[bold red]❌ Нет доступных звуков![/]")
             return {i: [] for i in range(len(gaps))}
 
-        console.print(f"  Кандидатов: [bold]{len(donor_entries)}[/] доноров из трека, [bold]{len(all_sounds)}[/] из библиотеки")
+        console.print(f"  Кандидатов: [bold]{len(donor_entries)}[/] доноров, [bold]{len(all_sounds)}[/] из библиотеки")
+        self._precompute_features(combined)
 
-        # Cache features
-        self._precompute_features(combined_sounds)
-
-        # Match each gap
         results: Dict[int, List[MatchResult]] = {}
-
         for i, gap in enumerate(gaps):
-            matches = self._match_gap(gap, combined_sounds, donors or [])
+            matches = self._match_gap(gap, combined, donors or [])
             results[i] = matches[:self.config.top_matches]
 
-        matched_count = sum(1 for m in results.values() if m)
-        console.print(f"[bold green]✓ Найдены подходящие звуки для {matched_count}/{len(gaps)} сегментов[/]")
-
+        matched = sum(1 for m in results.values() if m)
+        console.print(f"[bold green]✓ Подобраны звуки для {matched}/{len(gaps)} сегментов[/]")
         return results
 
-    def _precompute_features(self, sounds: List[SoundEntry]) -> None:
-        """Load and cache MFCC features for library sounds."""
+    def _precompute_features(self, sounds):
         with Progress(
             TextColumn("[progress.description]{task.description}"),
-            BarColumn(),
-            console=console,
+            BarColumn(), console=console,
         ) as progress:
-            task = progress.add_task(
-                "  Индексируем библиотеку...", total=len(sounds)
-            )
+            task = progress.add_task("  Индексируем библиотеку...", total=len(sounds))
             for sound in sounds:
                 key = str(sound.path)
                 if key not in self._feature_cache:
                     try:
-                        audio, sr = load_audio(
-                            sound.path, sr=self.config.sample_rate, mono=True
-                        )
-                        mfcc = compute_mfcc(
-                            audio, sr, n_mfcc=self.config.n_mfcc
-                        )
+                        audio, sr = load_audio(sound.path, sr=self.config.sample_rate, mono=True)
+                        mfcc = compute_mfcc(audio, sr, n_mfcc=self.config.n_mfcc)
                         self._feature_cache[key] = np.mean(mfcc, axis=1)
-                    except Exception as e:
-                        console.print(
-                            f"[dim red]  Пропускаем {sound.path.name}: {e}[/]"
-                        )
+                    except Exception:
+                        pass
                 progress.advance(task)
 
-    def _match_gap(
-        self,
-        gap: GapInfo,
-        sounds: List[SoundEntry],
-        donors: List[DonorSound],
-    ) -> List[MatchResult]:
-        """Score donors and library sounds against a single gap, strictly honoring acoustic type."""
+    def _match_gap(self, gap, sounds, donors):
         candidates: List[MatchResult] = []
 
-        # Find donor object lookup
-        donor_by_path = {str(d.path): d for d in donors}
+        # Pure speech or speech with only background music -> no SFX match needed
+        # (Background music is handled continuously by music_track / no_vocals)
+        sfx_events = [e for e in gap.overlapping_events if e.category not in ("music", "speech")]
+        if not sfx_events:
+            return []
+
+        # Target the highest-confidence discrete SFX event
+        target_sfx = max(sfx_events, key=lambda e: e.confidence)
+        target_cat = target_sfx.category
+        target_kw = CATEGORY_KEYWORDS.get(target_cat, [])
+        donor_paths = {str(d.path) for d in donors}
 
         for sound in sounds:
+            # Never insert background music tracks as discrete SFX
+            if sound.category.lower() == "music" and target_cat != "music":
+                continue
+
             key = str(sound.path)
             if key not in self._feature_cache:
                 continue
 
-            lib_mfcc = self._feature_cache[key]
-            gap_vec = gap.mfcc_profile.reshape(1, -1)
-            lib_vec = lib_mfcc.reshape(1, -1)
-
-            min_dim = min(gap_vec.shape[1], lib_vec.shape[1])
-            base_sim = float(
-                cosine_similarity(gap_vec[:, :min_dim], lib_vec[:, :min_dim])[0, 0]
-            )
-            sim = (base_sim + 1.0) / 2.0
-
-            is_donor = key in donor_by_path
-            donor_obj = donor_by_path.get(key)
+            is_donor = key in donor_paths
             name_lower = sound.name.lower()
             cat_lower = sound.category.lower()
 
-            # ── 1. Acoustic Type Rules & Penalties ────────────────────
-            # If gap is standard speech dialogue:
-            if gap.event_type == "speech_dialogue":
-                # Never auto-insert foley, alerts, impacts, or random noise into speech!
-                sim = 0.01
+            # Category/keyword match
+            kw_match = any(kw in name_lower for kw in target_kw)
+            cat_match = (cat_lower == target_cat)
 
-            # If gap is a camera drop impact:
-            elif gap.event_type == "camera_drop":
-                if any(w in name_lower for w in ["camera_drop", "drop_impact", "camera_table", "drop_table"]):
-                    sim = 0.99
-                elif cat_lower == "foley" and "drop" in name_lower:
-                    sim = 0.95
-                else:
+            if kw_match:
+                base = 0.80
+            elif cat_match:
+                base = 0.65
+            elif is_donor:
+                base = 0.50
+            else:
+                base = 0.10
+
+            # Spectral similarity bonus
+            lib_mfcc = self._feature_cache[key]
+            gap_vec = gap.mfcc_profile.reshape(1, -1)
+            lib_vec = lib_mfcc.reshape(1, -1)
+            min_dim = min(gap_vec.shape[1], lib_vec.shape[1])
+            cos_sim = float(cosine_similarity(gap_vec[:, :min_dim], lib_vec[:, :min_dim])[0, 0])
+            bonus = max(0.0, (cos_sim + 1.0) / 2.0 - 0.5) * 0.2
+
+            sim = min(0.99, base + bonus)
+
+            # Penalty for clearly wrong categories
+            if target_cat in ("gunshot", "explosion", "impact"):
+                if any(w in name_lower for w in ["wind", "rain", "noise", "room_tone", "pad", "drone"]):
+                    sim = 0.01
+            if target_cat == "alert":
+                if any(w in name_lower for w in ["explosion", "gunshot", "crash", "wind"]):
                     sim = 0.01
 
-            # If gap is camera shutter clicks:
-            elif gap.event_type == "camera_clicks":
-                if any(w in name_lower for w in ["camera_shutter", "shutter_burst", "shutter_single", "camera_clicks"]):
-                    sim = 0.99
-                elif cat_lower == "foley" and any(w in name_lower for w in ["click", "switch", "tap"]):
-                    sim = 0.85
-                else:
-                    sim = 0.01
+            rec_vol = self._recommend_volume(gap)
 
-            # If gap is combat gunshots:
-            elif gap.event_type == "gunshots_combat":
-                if any(w in name_lower for w in ["combat_rifle", "gunshot", "shotgun", "pistol"]):
-                    sim = 0.99
-                elif any(w in name_lower for w in ["car_crash", "thunder", "glass_shatter", "drop"]):
-                    sim = 0.01  # NEVER pick car crash or thunder for gunfire!
-                elif cat_lower == "impacts":
-                    sim = 0.35 + 0.15 * sim
-                else:
-                    sim = 0.01
-
-            # If gap is a tonal beep or alarm:
-            elif gap.is_tonal or gap.event_type == "tonal_beep":
-                # If donor from track has matching frequency:
-                if is_donor and donor_obj and donor_obj.is_tonal:
-                    freq_ratio = min(gap.dominant_freq, donor_obj.dominant_freq) / max(gap.dominant_freq, donor_obj.dominant_freq, 1.0)
-                    if freq_ratio > 0.85:
-                        # Genuine match from the same audio track!
-                        sim = 0.98 + 0.01 * freq_ratio
-                    else:
-                        # Different frequency pitch — not a match!
-                        sim = 0.05
-                elif cat_lower == "alerts":
-                    # Library alert sound (alarm, beep, ring)
-                    sim = 0.60 + 0.25 * sim
-                else:
-                    # NEVER insert non-alert sounds into an alarm beep!
-                    sim = 0.02
-
-            # If gap is an explosive blast or gunshot/impact:
-            elif gap.event_type in ["explosive_blast", "transient_impact"] or gap.category_hint == "impacts":
-                if is_donor and donor_obj and (donor_obj.is_transient or donor_obj.crest_factor > 3.5):
-                    sim = 0.92
-                elif cat_lower == "impacts":
-                    sim = 0.75 + 0.20 * sim
-                else:
-                    # NEVER insert alarm beeps, drones, or ambient noise into an explosion!
-                    sim = 0.02
-
-            # If gap is a transient foley (knock, click, tap):
-            elif gap.is_transient or gap.event_type == "transient_foley":
-                if is_donor and donor_obj and donor_obj.is_transient:
-                    sim = 0.90
-                elif cat_lower == "foley":
-                    sim = 0.65 + 0.25 * sim
-                else:
-                    sim = 0.02
-
-            # If gap is short (< 0.8s):
-            if gap.duration_sec < 0.8:
-                if any(w in name_lower for w in ["wind", "rain", "white_noise", "pink_noise", "brown_noise"]):
-                    sim = 0.02
-
-            # Standard category bonus
-            cat_match = (cat_lower == gap.category_hint.lower())
-            if cat_match and sim > 0.1:
-                sim = min(1.0, sim + 0.10)
-
-            # Recommend volume
-            rec_vol = self._recommend_volume(gap, sound)
-
-            if sim >= 0.20:
+            if sim >= 0.15:
                 candidates.append(MatchResult(
-                    sound=sound,
-                    similarity_score=min(0.99, sim),
-                    category_match=cat_match,
+                    sound=sound, similarity_score=sim,
+                    category_match=cat_match or kw_match,
                     spectral_distance=1.0 - sim,
-                    recommended_volume_db=rec_vol,
-                    is_donor=is_donor,
+                    recommended_volume_db=rec_vol, is_donor=is_donor,
                 ))
 
-        # Sort strictly by highest similarity score first
-        candidates.sort(
-            key=lambda m: -m.similarity_score
-        )
+        candidates.sort(key=lambda m: -m.similarity_score)
         return candidates
 
-    def _recommend_volume(self, gap: GapInfo, sound: SoundEntry) -> float:
-        """Recommend a volume adjustment for the matched sound."""
-        # Target: the energy loss should roughly be compensated
+    def _recommend_volume(self, gap):
         if gap.energy_loss_ratio < 0.1:
-            return -6.0  # minimal loss → keep quiet
+            return -6.0
         elif gap.energy_loss_ratio < 0.3:
             return -3.0
         elif gap.energy_loss_ratio < 0.6:

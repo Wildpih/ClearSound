@@ -418,7 +418,11 @@ class MainWindow(QMainWindow):
                 self.original_audio, self.sr = load_audio(project.source_path, sr=self.config.sample_rate)
                 # Align background music
                 from clearsound.ui.worker import PipelineWorker
-                pw = PipelineWorker(self.config, project.source_path, self.project_manager, self.library)
+                pw = PipelineWorker(
+                    input_path=project.source_path,
+                    config=self.config,
+                    library=self.library,
+                )
                 self.music_track, self.music_offset, self.music_gain, self.music_name = pw._find_and_align_music(self.original_audio, self.sr)
             except Exception:
                 self.original_audio = None

@@ -21,6 +21,7 @@ from clearsound.config import Config
 from clearsound.core.audio_utils import format_time, get_waveform_peaks, load_audio
 from clearsound.core.gap_analyzer import GapInfo
 from clearsound.core.sound_matcher import MatchResult
+from clearsound.core.sound_map_analyzer import SoundEvent
 from clearsound.library.sound_library import SoundEntry
 
 
@@ -138,6 +139,21 @@ class ProjectManager:
                 "is_tonal": gap.is_tonal,
                 "is_transient": gap.is_transient,
                 "event_type": gap.event_type,
+                # Neural network fields
+                "neural_label": gap.neural_label,
+                "neural_category": gap.neural_category,
+                "neural_confidence": gap.neural_confidence,
+                "overlapping_events": [
+                    {
+                        "label": ev.label,
+                        "category": ev.category,
+                        "start_sec": ev.start_sec,
+                        "end_sec": ev.end_sec,
+                        "confidence": ev.confidence,
+                        "overlaps_speech": ev.overlaps_speech,
+                    }
+                    for ev in (gap.overlapping_events or [])
+                ],
             }
             serialized_gaps.append(gap_dict)
             mfcc_list.append(gap.mfcc_profile if gap.mfcc_profile is not None else np.array([]))
@@ -232,7 +248,21 @@ class ProjectManager:
                     tonality=g.get("tonality", 0.0),
                     is_tonal=g.get("is_tonal", False),
                     is_transient=g.get("is_transient", False),
-                    event_type=g.get("event_type", "ambient_diffuse"),
+                    event_type=g.get("event_type", "speech_dialogue"),
+                    neural_label=g.get("neural_label", ""),
+                    neural_category=g.get("neural_category", ""),
+                    neural_confidence=g.get("neural_confidence", 0.0),
+                    overlapping_events=[
+                        SoundEvent(
+                            label=ev.get("label", ""),
+                            category=ev.get("category", "other"),
+                            start_sec=ev.get("start_sec", 0.0),
+                            end_sec=ev.get("end_sec", 0.0),
+                            confidence=ev.get("confidence", 0.0),
+                            overlaps_speech=ev.get("overlaps_speech", True),
+                        )
+                        for ev in g.get("overlapping_events", [])
+                    ],
                 )
                 gaps.append(gap)
             project.gaps = gaps

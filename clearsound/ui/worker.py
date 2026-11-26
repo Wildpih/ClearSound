@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import time
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple
 
 import numpy as np
 from PySide6.QtCore import QObject, QThread, Signal
@@ -20,6 +20,7 @@ from clearsound.core.donor_extractor import DonorExtractor, DonorSound
 from clearsound.core.gap_analyzer import GapAnalyzer, GapInfo
 from clearsound.core.sound_inserter import SoundInserter
 from clearsound.core.sound_matcher import MatchResult, SoundMatcher
+from clearsound.core.sound_map_analyzer import SoundEvent, SoundMapAnalyzer
 from clearsound.core.voice_remover import VoiceRemover
 from clearsound.library.sound_library import SoundLibrary
 from rich.console import Console
@@ -28,7 +29,18 @@ console = Console()
 
 
 class PipelineWorker(QThread):
-    """Background worker for the full ClearSound processing pipeline."""
+    """Background worker for the full ClearSound processing pipeline.
+
+    Pipeline order:
+    1. Load original audio
+    2. Neural sound map analysis on ORIGINAL (PANNs + Silero VAD)
+    3. Voice removal via Demucs
+    4. Gap analysis (uses neural map, NOT hardcoded timestamps)
+    5. Donor extraction from clean segments
+    6. Sound matching by neural labels
+    7. Sound insertion and reconstruction
+    8. Remux video for preview
+    """
 
     progress = Signal(str, int)     # (status_message, percent 0-100)
     finished = Signal(dict)         # dictionary of results
@@ -67,10 +79,14 @@ class PipelineWorker(QThread):
             no_vocals_wav = self.config.temp_dir / f"{self.input_path.stem}_no_vocals.wav"
             save_audio(no_vocals, no_vocals_wav, sr)
 
-            # ── Step 2: Gap Analysis & Donor Sound Extraction ─────────
-            self.progress.emit("Анализ пауз и поиск чистых звуков-доноров в видео...", 55)
+            # ── Step 2: Gap Analysis (Neural Sound Map on ORIGINAL) ───
+            self.progress.emit("Нейросетевой анализ звуковой карты и поиск пауз...", 55)
             analyzer = GapAnalyzer(self.config)
-            gaps = analyzer.analyze(original, no_vocals, vocals, sr)
+            # analyze() returns 3-tuple: (gaps, sound_events, speech_regions)
+            gaps, sound_events, speech_regions = analyzer.analyze(
+                original, no_vocals, vocals, sr,
+                callback=lambda msg: self.progress.emit(msg, 60),
+            )
 
             vocal_regions = [(g.start_sample, g.end_sample) for g in gaps]
             donor_extractor = DonorExtractor(self.config.temp_dir)
@@ -142,6 +158,8 @@ class PipelineWorker(QThread):
                 "music_offset": music_offset,
                 "music_gain": music_gain,
                 "music_name": music_name,
+                "sound_events": sound_events,
+                "speech_regions": speech_regions,
             }
             self.finished.emit(result)
 
@@ -206,7 +224,7 @@ class PipelineWorker(QThread):
             else:
                 exact_offset = max(0, best_offset)
 
-            # Compute relative gain by comparing symphonic body of music
+            # Compute relative gain
             m_start_eval = int(len(m_mono) * 0.4)
             m_end_eval = int(len(m_mono) * 0.8)
             a_start_eval = exact_offset + m_start_eval

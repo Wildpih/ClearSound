@@ -13,18 +13,26 @@ from clearsound.core.audio_utils import format_time
 from clearsound.core.gap_analyzer import GapInfo
 
 CATEGORY_COLORS = {
-    "alerts": QColor("#eab308"),
-    "donor": QColor("#22c55e"),
-    "impacts": QColor("#ef4444"),
     "speech": QColor("#3b82f6"),
-    "camera_drop": QColor("#06b6d4"),
-    "camera_clicks": QColor("#a855f7"),
-    "gunshots_combat": QColor("#dc2626"),
-    "ambient": QColor("#00d2b4"),
-    "nature": QColor("#10b981"),
     "music": QColor("#8b5cf6"),
-    "urban": QColor("#f59e0b"),
+    "gunshot": QColor("#dc2626"),
+    "explosion": QColor("#ef4444"),
+    "impact": QColor("#f97316"),
+    "camera": QColor("#06b6d4"),
+    "crowd": QColor("#f59e0b"),
+    "alert": QColor("#eab308"),
+    "vehicle": QColor("#818cf8"),
+    "nature": QColor("#10b981"),
+    "animal": QColor("#fb923c"),
     "foley": QColor("#ec4899"),
+    "donor": QColor("#22c55e"),
+    "other": QColor("#64748b"),
+    # Legacy fallbacks
+    "alerts": QColor("#eab308"),
+    "impacts": QColor("#ef4444"),
+    "ambient": QColor("#00d2b4"),
+    "urban": QColor("#f59e0b"),
+    "speech_dialogue": QColor("#3b82f6"),
 }
 
 

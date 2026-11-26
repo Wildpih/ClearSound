@@ -1,6 +1,10 @@
-"""Sound inserter — blends matched library sounds into the vocal-removed
-audio, applying crossfades, volume matching, time-stretching, and
-optional spectral shaping so the result sounds natural.
+"""Sound inserter — reconstructs audio by:
+1. Preserving original audio where no speech exists.
+2. Silencing (fade-to-zero) regions that are speech-only (no background sounds).
+3. Blending Demucs no_vocals base + matched library sounds for regions
+   where speech overlaps with other sounds.
+
+No hardcoded timestamps or video-specific logic.
 """
 
 from __future__ import annotations
@@ -10,22 +14,15 @@ from typing import Dict, List, Optional, Tuple
 
 import numpy as np
 from rich.console import Console
-from rich.progress import BarColumn, Progress, TextColumn
 
 from clearsound.config import Config
 from clearsound.core.audio_utils import (
-    apply_eq,
     apply_fade,
-    apply_harmonic_exciter,
-    compute_spectral_envelope,
-    crossfade,
     db_to_amplitude,
-    extract_percussive_transient,
     load_audio,
     match_loudness,
     save_audio,
     seconds_to_samples,
-    spectral_shape,
     time_stretch,
 )
 from clearsound.core.gap_analyzer import GapInfo
@@ -35,10 +32,16 @@ console = Console()
 
 
 class SoundInserter:
-    """Insert matched sounds into the vocal-removed audio."""
+    """Insert matched sounds into the audio, following the new neural-map
+    architecture.  Original audio is the base; speech regions are
+    reconstructed depending on what the neural net detected underneath."""
 
     def __init__(self, config: Config):
         self.config = config
+
+    # ──────────────────────────────────────────────────────────────────
+    #  Public API
+    # ──────────────────────────────────────────────────────────────────
 
     def insert(
         self,
@@ -55,429 +58,303 @@ class SoundInserter:
         music_gain: float = 1.0,
         original: Optional[np.ndarray] = None,
     ) -> np.ndarray:
-        """Insert matched sounds into the no-vocals audio.
+        """Reconstruct audio with matched sounds inserted into speech regions.
 
-        Args:
-            no_vocals: Audio without vocals, shape (channels, samples) or (samples,).
-            gaps: List of gap info from the analyzer.
-            matches: Dict gap_index → list of MatchResult (best first).
-            sr: Sample rate.
-            volume_adjustments: Optional per-gap volume overrides (dB).
-            sound_overrides: Optional per-gap sound path overrides.
-            enabled_map: Optional mapping gap_index → bool (whether to insert).
-            vocals: Optional vocal stem array for HPSS transient de-bleeding.
-            music_track: Optional clean background music track (un-muffled, zero voice).
-            music_offset_samples: Offset of clean music track relative to start of audio.
-            music_gain: Relative gain adjustment for clean music track.
-            original: Kept for API compatibility, never directly pasted over gaps.
-
-        Returns:
-            Enhanced audio with the same shape as no_vocals.
+        Reconstruction strategy per gap:
+        • no overlapping sounds → fade to silence (avoid Demucs artefacts).
+        • overlapping sounds exist → use no_vocals as base in that region,
+          then layer matched library SFX on top aligned to transients.
+        • user override "__none__" → silence.
+        • user override "__clean_music__" → fill with clean music track.
+        • user override with file path → load and insert that file.
         """
         console.print("\n[bold cyan]🎼 Вставляем звуки в аудио...[/]")
 
+        # Start from original if available (best quality base)
         if original is not None:
             is_stereo = original.ndim > 1
             result = original.copy()
-            mono_orig = np.mean(original, axis=0) if is_stereo else original.copy()
+            total_len = original.shape[-1]
         elif no_vocals is not None:
             is_stereo = no_vocals.ndim > 1
             result = no_vocals.copy()
-            mono_orig = np.mean(no_vocals, axis=0) if is_stereo else no_vocals.copy()
+            total_len = no_vocals.shape[-1]
         else:
-            raise ValueError("Either original or no_vocals must be provided to SoundInserter.")
+            raise ValueError("Either original or no_vocals must be provided.")
 
-        fade_len = min(int(0.020 * sr), len(mono_orig) // 10)
+        fade_len = min(int(0.020 * sr), total_len // 10)
         inserted_count = 0
 
         for i, gap in enumerate(gaps):
+            # ── Skip disabled gaps ────────────────────────────────────
             if enabled_map is not None and not enabled_map.get(i, True):
                 continue
 
             start = gap.start_sample
             end = gap.end_sample
+            if start >= total_len or end <= 0:
+                continue
+            start = max(0, start)
+            end = min(total_len, end)
+            seg_len = end - start
+            if seg_len < 64:
+                continue
 
+            # ── Handle user overrides first ───────────────────────────
             is_manual_override = bool(sound_overrides and i in sound_overrides and sound_overrides[i])
             override_val = str(sound_overrides[i]) if is_manual_override else ""
 
-            # ── 1. Speech suppression / Clean Background Music ─────────────
-            # Following user instruction:
-            # - If before music starts: smoothly fade to 0.0 (silence without electric Demucs murmur)
-            # - If during music: fill seamlessly with clean instrumental OST
-            if end <= music_offset_samples or music_track is None:
-                w_in = np.linspace(1, 0, fade_len)
-                w_out = np.linspace(0, 1, fade_len)
-                if is_stereo:
-                    for ch in range(result.shape[0]):
-                        result[ch, start:start+fade_len] *= w_in
-                        result[ch, start+fade_len:max(start+fade_len, end-fade_len)] = 0.0
-                        if end - fade_len > start:
-                            result[ch, end-fade_len:end] *= w_out
-                else:
-                    result[start:start+fade_len] *= w_in
-                    result[start+fade_len:max(start+fade_len, end-fade_len)] = 0.0
-                    if end - fade_len > start:
-                        result[end-fade_len:end] *= w_out
-            elif start >= music_offset_samples and music_track is not None:
-                m_s = start - music_offset_samples
-                m_e = end - music_offset_samples
-                track_len = music_track.shape[1] if music_track.ndim > 1 else len(music_track)
-                m_dur = min(track_len - m_s, end - start)
-                if m_dur > 0:
-                    if music_track.ndim > 1:
-                        m_seg = music_track[:, m_s : m_s + m_dur] * music_gain
-                    else:
-                        m_seg = music_track[m_s : m_s + m_dur] * music_gain
-                    f_in = min(fade_len, m_dur)
-                    f_out = min(fade_len, m_dur)
-                    w_in = np.linspace(0, 1, f_in)
-                    w_out = np.linspace(1, 0, f_out)
-                    if is_stereo:
-                        if m_seg.ndim == 1:
-                            m_seg = np.vstack([m_seg, m_seg])
-                        elif m_seg.shape[0] < result.shape[0]:
-                            m_seg = np.repeat(m_seg, result.shape[0], axis=0)
-                        for ch in range(result.shape[0]):
-                            seg = m_seg[ch, :m_dur].copy()
-                            if f_in > 0:
-                                seg[:f_in] = result[ch, start:start+f_in] * (1 - w_in) + seg[:f_in] * w_in
-                            if f_out > 0:
-                                seg[-f_out:] = seg[-f_out:] * w_out + result[ch, start+m_dur-f_out:start+m_dur] * (1 - w_out)
-                            result[ch, start:start+m_dur] = seg
-                    else:
-                        seg = (np.mean(m_seg, axis=0) if m_seg.ndim > 1 else m_seg)[:m_dur].copy()
-                        if f_in > 0:
-                            seg[:f_in] = result[start:start+f_in] * (1 - w_in) + seg[:f_in] * w_in
-                        if f_out > 0:
-                            seg[-f_out:] = seg[-f_out:] * w_out + result[start+m_dur-f_out:start+m_dur] * (1 - w_out)
-                        result[start:start+m_dur] = seg
-            else:
-                # Straddles boundary
-                w_in = np.linspace(1, 0, fade_len)
-                if is_stereo:
-                    for ch in range(result.shape[0]):
-                        result[ch, start:start+fade_len] *= w_in
-                        result[ch, start+fade_len:music_offset_samples] = 0.0
-                else:
-                    result[start:start+fade_len] *= w_in
-                    result[start+fade_len:music_offset_samples] = 0.0
-                if music_track is not None:
-                    track_len = music_track.shape[1] if music_track.ndim > 1 else len(music_track)
-                    m_dur = min(track_len, end - music_offset_samples)
-                    if m_dur > 0:
-                        if music_track.ndim > 1:
-                            m_seg = music_track[:, :m_dur] * music_gain
-                        else:
-                            m_seg = music_track[:m_dur] * music_gain
-                        if is_stereo:
-                            if m_seg.ndim == 1:
-                                m_seg = np.vstack([m_seg, m_seg])
-                            elif m_seg.shape[0] < result.shape[0]:
-                                m_seg = np.repeat(m_seg, result.shape[0], axis=0)
-                            for ch in range(result.shape[0]):
-                                result[ch, music_offset_samples:music_offset_samples+m_dur] = m_seg[ch]
-                        else:
-                            result[music_offset_samples:music_offset_samples+m_dur] = (np.mean(m_seg, axis=0) if m_seg.ndim > 1 else m_seg)
-
-            # ── 2. Determine if a sound effect is to be inserted ───────────
-            if override_val in ["__none__", "none", "__clean_music__"]:
+            if override_val in ("__none__", "none"):
+                # User explicitly wants silence
+                self._fade_to_silence(result, start, end, fade_len, is_stereo)
                 continue
 
-            sound_path: Optional[Path | str] = None
-            if is_manual_override and override_val not in ["__restore_orig__", "__clean_music__", "__none__", "none"]:
-                sound_path = sound_overrides[i]
-            else:
-                gap_matches = matches.get(i, [])
-                if gap.event_type in ["camera_drop", "camera_clicks", "gunshots_combat", "tonal_beep", "transient_impact"]:
-                    if gap_matches:
-                        sound_path = gap_matches[0].sound.path
+            if override_val == "__clean_music__":
+                self._fill_with_music(
+                    result, start, end, fade_len, is_stereo,
+                    music_track, music_offset_samples, music_gain,
+                )
+                continue
+
+            if is_manual_override and override_val not in ("__none__", "none", "__clean_music__"):
+                # Custom sound file
+                self._fade_to_silence(result, start, end, fade_len, is_stereo)
+                self._insert_sound_from_path(
+                    result, gap, Path(override_val), sr, start, end, fade_len,
+                    is_stereo, total_len,
+                    volume_adjustments.get(i, 0.0) if volume_adjustments else 0.0,
+                )
+                inserted_count += 1
+                continue
+
+            # ── Automatic logic based on neural analysis ──────────────
+            sfx_events = [e for e in gap.overlapping_events if e.category not in ("music", "speech")]
+            has_music = any(e.category == "music" for e in gap.overlapping_events) or (
+                music_track is not None and start >= music_offset_samples
+            )
+
+            # Step 1: Background reconstruction
+            if has_music and music_track is not None and start >= music_offset_samples:
+                # Region has background music and clean music track is available
+                self._fill_with_music(
+                    result, start, end, fade_len, is_stereo,
+                    music_track, music_offset_samples, music_gain,
+                )
+            elif has_music or gap.has_overlapping_sounds:
+                # Region has background sounds/music but no separate clean OST track -> crossfade no_vocals
+                if no_vocals is not None:
+                    self._crossfade_region(result, no_vocals, start, end, fade_len, is_stereo)
                 else:
-                    # Speech dialogue: pure background / clean music, no SFX needed
-                    continue
+                    self._fade_to_silence(result, start, end, fade_len, is_stereo)
+            else:
+                # Pure speech dialogue, NO music and NO sounds -> fade to silence (eliminates electric murmur)
+                self._fade_to_silence(result, start, end, fade_len, is_stereo)
+
+            # Step 2: Layer matched discrete SFX on top (if any)
+            gap_matches = matches.get(i, [])
+            if not gap_matches:
+                continue
+
+            # Pick the best match
+            sound_path: Optional[Path] = None
+            best_match = gap_matches[0]
+            if best_match.sound.path and Path(best_match.sound.path).is_file():
+                sound_path = Path(best_match.sound.path)
+            else:
+                # Try to find the sound in library by name
+                p_check = Path(best_match.sound.path)
+                candidates = (
+                    list(self.config.sounds_dir.glob(f"**/{p_check.stem}.wav"))
+                    + list(self.config.sounds_dir.glob(f"**/{p_check.stem}.mp3"))
+                )
+                if candidates:
+                    sound_path = candidates[0]
 
             if not sound_path:
                 continue
 
-            p_check = Path(sound_path)
-            if not p_check.is_file():
-                matches_in_lib = list(self.config.sounds_dir.glob(f"**/{p_check.stem}.wav")) + list(self.config.sounds_dir.glob(f"**/{p_check.stem}.mp3"))
-                if matches_in_lib:
-                    sound_path = matches_in_lib[0]
-
-            gap_matches = matches.get(i, [])
-            default_vol = gap_matches[0].recommended_volume_db if gap_matches else 0.0
-            vol_db = volume_adjustments.get(i, default_vol) if volume_adjustments else default_vol
-            vol_factor = db_to_amplitude(vol_db)
-
-            try:
-                snd, _ = load_audio(sound_path, sr=sr, mono=False)
-            except Exception as e:
-                console.print(f"[dim red]  Не удалось загрузить {sound_path}: {e}[/]")
-                continue
-
-            snd_mono = np.mean(snd, axis=0) if snd.ndim > 1 else snd
-
-            # ── 3. High-precision Transient & Impact Timing Alignment ─────
-            if gap.event_type == "camera_drop":
-                orig_slice = mono_orig[start:end]
-                p_orig = start + np.argmax(np.abs(orig_slice))
-                p_snd = np.argmax(np.abs(snd_mono))
-                insert_idx = max(0, p_orig - p_snd)
-                vol_factor *= 1.10
-            elif gap.event_type in ["camera_clicks", "gunshots_combat"]:
-                max_a = np.max(np.abs(snd_mono)) + 1e-9
-                onsets = np.where(np.abs(snd_mono) > 0.15 * max_a)[0]
-                p_snd = onsets[0] if len(onsets) > 0 else 0
-                orig_slice = mono_orig[start:end]
-                max_orig = np.max(np.abs(orig_slice)) + 1e-9
-                orig_onsets = np.where(np.abs(orig_slice) > 0.20 * max_orig)[0]
-                p_orig = (start + orig_onsets[0]) if len(orig_onsets) > 0 else start
-                insert_idx = max(0, p_orig - p_snd)
-            else:
-                insert_idx = start
-
-            # Insert replacement sound with full natural resonance & tail
-            snd_len = min(snd.shape[1] if snd.ndim > 1 else len(snd), result.shape[1] - insert_idx)
-            if is_stereo:
-                if snd.ndim == 1:
-                    snd = np.vstack([snd, snd])
-                elif snd.shape[0] < result.shape[0]:
-                    snd = np.repeat(snd, result.shape[0], axis=0)
-                for ch in range(result.shape[0]):
-                    result[ch, insert_idx:insert_idx+snd_len] += snd[ch, :snd_len] * vol_factor
-            else:
-                snd_m = np.mean(snd, axis=0) if snd.ndim > 1 else snd
-                result[insert_idx:insert_idx+snd_len] += snd_m[:snd_len] * vol_factor
-
+            vol_db = (volume_adjustments or {}).get(i, best_match.recommended_volume_db)
+            self._insert_sound_from_path(
+                result, gap, sound_path, sr, start, end, fade_len,
+                is_stereo, total_len, vol_db,
+            )
             inserted_count += 1
 
-        # ── Final safety clip without global attenuation ──────────────
+        # Final safety clip
         np.clip(result, -1.0, 1.0, out=result)
 
-        console.print(
-            f"[bold green]✓ Вставлено звуков: {inserted_count}/{len(gaps)}[/]"
-        )
+        console.print(f"[bold green]✓ Вставлено звуков: {inserted_count}/{len(gaps)}[/]")
         return result
 
-    def _debleed_vocal(self, audio_seg: np.ndarray, voc_seg: np.ndarray, sr: int = 44100) -> np.ndarray:
-        """Attenuate residual vocal formants that Demucs leaked into no_vocals."""
-        if len(audio_seg) < 512 or np.max(np.abs(voc_seg)) < 1e-6:
-            return audio_seg
-        from scipy.signal import stft, istft
-        nperseg = min(2048, len(audio_seg))
-        noverlap = nperseg * 3 // 4
-        _, _, Zn = stft(audio_seg, fs=sr, nperseg=nperseg, noverlap=noverlap)
-        _, _, Zv = stft(voc_seg, fs=sr, nperseg=nperseg, noverlap=noverlap)
-        mag_n = np.abs(Zn)
-        mag_v = np.abs(Zv)
-        phase_n = np.angle(Zn)
-        freqs = np.linspace(0, sr / 2, mag_n.shape[0])
-        vocal_band = (freqs >= 100) & (freqs <= 3500)
-        v_peak = np.max(mag_v) + 1e-9
-        v_act = np.clip(mag_v / v_peak, 0.0, 1.0)
-        gain = np.ones_like(mag_n)
-        gain[vocal_band, :] = np.clip(1.0 - 0.40 * v_act[vocal_band, :], 0.35, 1.0)
-        Z_clean = (mag_n * gain) * np.exp(1j * phase_n)
-        _, out = istft(Z_clean, fs=sr, nperseg=nperseg, noverlap=noverlap)
-        return out[:len(audio_seg)].astype(audio_seg.dtype)
+    # ──────────────────────────────────────────────────────────────────
+    #  Private helpers
+    # ──────────────────────────────────────────────────────────────────
 
-    def _prepare_patch_by_path(
-        self,
-        gap: GapInfo,
-        sound_path: Path | str,
-        mono_novoc: np.ndarray,
-        sr: int,
-        volume_db: float,
-    ) -> np.ndarray:
-        """Prepare a sound patch from a path, preserving acoustic nature."""
-        audio, _ = load_audio(sound_path, sr=sr, mono=True)
-        target_len = gap.duration_samples
+    def _fade_to_silence(self, result, start, end, fade_len, is_stereo):
+        """Smoothly fade the region to zero — avoids Demucs electric murmur."""
+        seg_len = end - start
+        f_in = min(fade_len, seg_len // 2)
+        f_out = min(fade_len, seg_len // 2)
+        w_in = np.linspace(1, 0, f_in) if f_in > 0 else np.array([])
+        w_out = np.linspace(0, 1, f_out) if f_out > 0 else np.array([])
+
+        if is_stereo:
+            for ch in range(result.shape[0]):
+                if f_in > 0:
+                    result[ch, start:start + f_in] *= w_in
+                if end - start > f_in + f_out:
+                    result[ch, start + f_in:end - f_out] = 0.0
+                if f_out > 0:
+                    result[ch, end - f_out:end] *= w_out
+        else:
+            if f_in > 0:
+                result[start:start + f_in] *= w_in
+            if end - start > f_in + f_out:
+                result[start + f_in:end - f_out] = 0.0
+            if f_out > 0:
+                result[end - f_out:end] *= w_out
+
+    def _crossfade_region(self, result, no_vocals, start, end, fade_len, is_stereo):
+        """Replace a region in result with no_vocals, with crossfades at borders."""
+        seg_len = end - start
+        f = min(fade_len, seg_len // 2)
+
+        if is_stereo:
+            nv = no_vocals if no_vocals.ndim > 1 else np.vstack([no_vocals, no_vocals])
+            for ch in range(min(result.shape[0], nv.shape[0])):
+                seg = nv[ch, start:end].copy()
+                if f > 0:
+                    ramp_in = np.linspace(0, 1, f)
+                    ramp_out = np.linspace(1, 0, f)
+                    seg[:f] = result[ch, start:start + f] * (1 - ramp_in) + seg[:f] * ramp_in
+                    seg[-f:] = seg[-f:] * ramp_out + result[ch, end - f:end] * (1 - ramp_out)
+                result[ch, start:end] = seg
+        else:
+            nv_mono = np.mean(no_vocals, axis=0) if no_vocals.ndim > 1 else no_vocals
+            seg = nv_mono[start:end].copy()
+            if f > 0:
+                ramp_in = np.linspace(0, 1, f)
+                ramp_out = np.linspace(1, 0, f)
+                seg[:f] = result[start:start + f] * (1 - ramp_in) + seg[:f] * ramp_in
+                seg[-f:] = seg[-f:] * ramp_out + result[end - f:end] * (1 - ramp_out)
+            result[start:end] = seg
+
+    def _fill_with_music(self, result, start, end, fade_len, is_stereo,
+                         music_track, music_offset_samples, music_gain):
+        """Fill a region with clean background music from library."""
+        if music_track is None:
+            self._fade_to_silence(result, start, end, fade_len, is_stereo)
+            return
+
+        m_s = start - music_offset_samples
+        m_e = end - music_offset_samples
+        track_len = music_track.shape[-1]
+
+        if m_s < 0 or m_s >= track_len:
+            self._fade_to_silence(result, start, end, fade_len, is_stereo)
+            return
+
+        m_dur = min(track_len - m_s, end - start)
+        if m_dur <= 0:
+            self._fade_to_silence(result, start, end, fade_len, is_stereo)
+            return
+
+        f = min(fade_len, m_dur // 2)
+
+        if is_stereo:
+            if music_track.ndim == 1:
+                m_seg = np.vstack([music_track[m_s:m_s + m_dur],
+                                   music_track[m_s:m_s + m_dur]]) * music_gain
+            else:
+                m_seg = music_track[:, m_s:m_s + m_dur] * music_gain
+                if m_seg.shape[0] < result.shape[0]:
+                    m_seg = np.repeat(m_seg, result.shape[0], axis=0)
+            for ch in range(result.shape[0]):
+                seg = m_seg[ch, :m_dur].copy()
+                if f > 0:
+                    ramp_in = np.linspace(0, 1, f)
+                    ramp_out = np.linspace(1, 0, f)
+                    seg[:f] = result[ch, start:start + f] * (1 - ramp_in) + seg[:f] * ramp_in
+                    seg[-f:] = seg[-f:] * ramp_out + result[ch, start + m_dur - f:start + m_dur] * (1 - ramp_out)
+                result[ch, start:start + m_dur] = seg
+        else:
+            if music_track.ndim > 1:
+                m_seg = np.mean(music_track[:, m_s:m_s + m_dur], axis=0) * music_gain
+            else:
+                m_seg = music_track[m_s:m_s + m_dur] * music_gain
+            seg = m_seg[:m_dur].copy()
+            if f > 0:
+                ramp_in = np.linspace(0, 1, f)
+                ramp_out = np.linspace(1, 0, f)
+                seg[:f] = result[start:start + f] * (1 - ramp_in) + seg[:f] * ramp_in
+                seg[-f:] = seg[-f:] * ramp_out + result[start + m_dur - f:start + m_dur] * (1 - ramp_out)
+            result[start:start + m_dur] = seg
+
+    def _insert_sound_from_path(self, result, gap, sound_path, sr, start, end,
+                                 fade_len, is_stereo, total_len, volume_db):
+        """Load a sound file and overlay it at the gap position, aligned
+        to the original transient timing."""
+        try:
+            snd, _ = load_audio(sound_path, sr=sr, mono=False)
+        except Exception as e:
+            console.print(f"[dim red]  Не удалось загрузить {sound_path}: {e}[/]")
+            return
+
         vol_factor = db_to_amplitude(volume_db)
+        mono_result = np.mean(result, axis=0) if result.ndim > 1 else result
 
-        # ── A. Tonal Sounds (Alarm Beeps, Rings, Chimes) ──────────────
-        if gap.is_tonal or gap.event_type == "tonal_beep":
-            # Never time-stretch a beep! It distorts pitch and creates robotic warble
-            if len(audio) > target_len:
-                patch = audio[:target_len] * vol_factor
-            else:
-                # If short single beep, place it cleanly or repeat with realistic pause
-                if len(audio) < int(0.3 * sr) and target_len >= 2 * len(audio):
-                    pause = np.zeros(int(0.08 * sr), dtype=np.float32)
-                    unit = np.concatenate([audio, pause])
-                    repeats = (target_len // len(unit)) + 1
-                    patch = np.tile(unit, repeats)[:target_len] * vol_factor
-                else:
-                    patch = np.zeros(target_len, dtype=np.float32)
-                    patch[:len(audio)] = audio * vol_factor
+        # ── Transient alignment ───────────────────────────────────────
+        # Align the sound's peak/onset to the original's peak in this region
+        snd_mono = np.mean(snd, axis=0) if snd.ndim > 1 else snd
+        orig_slice = mono_result[start:end]
 
-            # Gentle 4ms anti-click fade
-            fade_samples = int(0.004 * sr)
-            return apply_fade(patch, fade_in_samples=fade_samples, fade_out_samples=fade_samples)
+        # Find peak in original region
+        p_orig = start + np.argmax(np.abs(orig_slice)) if len(orig_slice) > 0 else start
+        # Find peak in replacement sound
+        p_snd = np.argmax(np.abs(snd_mono)) if len(snd_mono) > 0 else 0
 
-        # ── B. Camera Drop Impact ─────────────────────────────────────
-        if gap.event_type == "camera_drop":
-            patch = np.zeros(target_len, dtype=np.float32)
-            usable = min(len(audio), target_len)
-            patch[:usable] = audio[:usable] * vol_factor
-            fade_in = int(0.002 * sr)
-            fade_out = int(0.02 * sr)
-            return apply_fade(patch, fade_in_samples=fade_in, fade_out_samples=fade_out)
+        # Bound insert_idx so it stays at the gap and doesn't jump way before
+        insert_idx = max(start, p_orig - p_snd)
+        if insert_idx > end:
+            insert_idx = start
 
-        # ── C. Camera Shutter Clicks (Burst or Single) ────────────────
-        if gap.event_type == "camera_clicks":
-            if len(audio) < target_len:
-                repeats = (target_len // len(audio)) + 1
-                patch = np.tile(audio, repeats)[:target_len] * vol_factor
-            else:
-                patch = audio[:target_len] * vol_factor
-            fade = int(0.004 * sr)
-            return apply_fade(patch, fade_in_samples=fade, fade_out_samples=fade)
+        # Determine usable length — prevent one-shots from bleeding indefinitely into later gaps
+        snd_len = snd.shape[-1]
+        max_duration = max(end - insert_idx + int(1.0 * sr), int(1.2 * sr))
+        usable = min(snd_len, max_duration, total_len - insert_idx)
+        if usable <= 0:
+            return
 
-        # ── D. Combat Gunfire & Rifle Bursts ──────────────────────────
-        if gap.event_type == "gunshots_combat":
-            if len(audio) < target_len:
-                repeats = (target_len // len(audio)) + 1
-                patch = np.tile(audio, repeats)[:target_len] * vol_factor
-            else:
-                patch = audio[:target_len] * vol_factor
-            fade = int(0.003 * sr)
-            return apply_fade(patch, fade_in_samples=fade, fade_out_samples=fade)
+        # Short fade-in/out on the replacement sound itself
+        f_in = min(int(0.003 * sr), usable // 4)
+        f_out = min(int(0.010 * sr), usable // 4)
 
-        # ── B. Transient Foley (Knocks, Clicks, Steps) ────────────────
-        if gap.is_transient or gap.event_type == "transient_foley":
-            # Transients must keep sharp attack
-            patch = np.zeros(target_len, dtype=np.float32)
-            usable = min(len(audio), target_len)
-            patch[:usable] = audio[:usable] * vol_factor
-            fade_samples = int(0.003 * sr)
-            return apply_fade(patch, fade_in_samples=fade_samples, fade_out_samples=fade_samples)
+        if is_stereo:
+            if snd.ndim == 1:
+                snd = np.vstack([snd, snd])
+            elif snd.shape[0] < result.shape[0]:
+                snd = np.repeat(snd, result.shape[0] // snd.shape[0] + 1, axis=0)
+            for ch in range(result.shape[0]):
+                patch = snd[ch, :usable].copy() * vol_factor
+                if f_in > 0:
+                    patch[:f_in] *= np.linspace(0, 1, f_in)
+                if f_out > 0:
+                    patch[-f_out:] *= np.linspace(1, 0, f_out)
+                result[ch, insert_idx:insert_idx + usable] += patch
+        else:
+            snd_m = np.mean(snd, axis=0) if snd.ndim > 1 else snd
+            patch = snd_m[:usable].copy() * vol_factor
+            if f_in > 0:
+                patch[:f_in] *= np.linspace(0, 1, f_in)
+            if f_out > 0:
+                patch[-f_out:] *= np.linspace(1, 0, f_out)
+            result[insert_idx:insert_idx + usable] += patch
 
-        # ── C. Cinematic Impacts & Explosions (One-Shot with Natural Tail) ───
-        if gap.event_type in ["explosive_blast", "transient_impact"] or gap.category_hint == "impacts":
-            # Never loop or stretch an explosion/gunshot!
-            # Keep authentic attack and let tail decay naturally.
-            usable = min(len(audio), target_len)
-            patch = np.zeros(target_len, dtype=np.float32)
-            patch[:usable] = audio[:usable] * vol_factor
-            fade_in = int(0.002 * sr)
-            fade_out = int(0.02 * sr)
-            return apply_fade(patch, fade_in_samples=fade_in, fade_out_samples=fade_out)
+    # ──────────────────────────────────────────────────────────────────
+    #  Save helper
+    # ──────────────────────────────────────────────────────────────────
 
-        # ── D. Continuous Ambient Noise (Room Tone, Wind, Rain) ───────
-        if len(audio) < target_len:
-            repeats = (target_len // len(audio)) + 1
-            audio = np.tile(audio, repeats)
-
-        if len(audio) != target_len:
-            ratio = len(audio) / target_len
-            if 0.5 < ratio < 2.0:
-                audio = time_stretch(audio, target_len, sr)
-            else:
-                audio = audio[:target_len]
-
-        audio = audio * vol_factor
-
-        # Spectral shaping for ambient background
-        if self.config.apply_spectral_shaping and gap.spectral_envelope is not None:
-            try:
-                audio = spectral_shape(audio, gap.spectral_envelope, sr)
-            except Exception:
-                pass
-
-        # Match loudness to context
-        context_samples = seconds_to_samples(1.0, sr)
-        ctx_start = max(0, gap.start_sample - context_samples)
-        ctx_end = min(len(mono_novoc), gap.end_sample + context_samples)
-        context = np.concatenate([
-            mono_novoc[ctx_start:gap.start_sample],
-            mono_novoc[gap.end_sample:ctx_end],
-        ])
-
-        if len(context) > 0 and np.max(np.abs(context)) > 1e-8:
-            audio = match_loudness(audio, context)
-            audio = audio * vol_factor
-
-        fade = seconds_to_samples(self.config.crossfade_duration, sr)
-        return apply_fade(audio, fade_in_samples=fade, fade_out_samples=fade)
-
-    def _prepare_patch(
-        self,
-        gap: GapInfo,
-        match: MatchResult,
-        mono_novoc: np.ndarray,
-        sr: int,
-        volume_db: float,
-    ) -> np.ndarray:
-        """Prepare a single sound patch from MatchResult."""
-        return self._prepare_patch_by_path(
-            gap, match.sound.path, mono_novoc, sr, volume_db
-        )
-        """Prepare a single sound patch for insertion.
-
-        Steps:
-        1. Load the matched sound.
-        2. Time-stretch to match gap duration.
-        3. Apply volume adjustment.
-        4. Optionally apply spectral shaping.
-        5. Apply fade in/out.
-        6. Match loudness to surrounding context.
-        """
-        # Load
-        audio, _ = load_audio(match.sound.path, sr=sr, mono=True)
-
-        target_len = gap.duration_samples
-
-        # ── Time-stretch or loop to match gap length ──────────────────
-        if len(audio) < target_len:
-            # If the sound is too short, loop it
-            repeats = (target_len // len(audio)) + 1
-            audio = np.tile(audio, repeats)
-
-        if len(audio) != target_len:
-            # Try time stretch for moderate ratios
-            ratio = len(audio) / target_len
-            if 0.5 < ratio < 2.0:
-                audio = time_stretch(audio, target_len, sr)
-            else:
-                audio = audio[:target_len]
-
-        # ── Volume adjustment ─────────────────────────────────────────
-        vol_factor = db_to_amplitude(volume_db)
-        audio = audio * vol_factor
-
-        # ── Spectral shaping ──────────────────────────────────────────
-        if self.config.apply_spectral_shaping and gap.spectral_envelope is not None:
-            try:
-                audio = spectral_shape(audio, gap.spectral_envelope, sr)
-            except Exception:
-                pass  # fall back to unshaped audio
-
-        # ── Match loudness to surrounding context ─────────────────────
-        context_samples = seconds_to_samples(1.0, sr)
-        ctx_start = max(0, gap.start_sample - context_samples)
-        ctx_end = min(len(mono_novoc), gap.end_sample + context_samples)
-        context = np.concatenate([
-            mono_novoc[ctx_start:gap.start_sample],
-            mono_novoc[gap.end_sample:ctx_end],
-        ])
-
-        if len(context) > 0 and np.max(np.abs(context)) > 1e-8:
-            audio = match_loudness(audio, context)
-            # Re-apply the user-requested volume tweak on top
-            audio = audio * vol_factor
-
-        # ── Fade in/out ───────────────────────────────────────────────
-        fade = seconds_to_samples(self.config.crossfade_duration, sr)
-        audio = apply_fade(audio, fade_in_samples=fade, fade_out_samples=fade)
-
-        return audio
-
-    def save_result(
-        self,
-        audio: np.ndarray,
-        output_path: str,
-        sr: int,
-    ):
+    def save_result(self, audio: np.ndarray, output_path: str, sr: int):
         """Save the final enhanced audio."""
         path = save_audio(audio, output_path, sr)
         console.print(f"\n[bold green]💾 Результат сохранён: {path}[/]")
