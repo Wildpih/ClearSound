@@ -35,8 +35,16 @@ def _build_category_map() -> Dict[str, str]:
     speech = {
         "Speech", "Male speech, man speaking", "Female speech, woman speaking",
         "Child speech, kid speaking", "Conversation", "Narration, monologue",
-        "Babbling", "Whispering", "Shout", "Yell", "Screaming",
-        "Singing", "Chant", "Laughter", "Crying, sobbing",
+        "Babbling", "Whispering", "Shout", "Yell", "Screaming", "Battle cry",
+        "Singing", "Chant", "Male singing", "Female singing", "Child singing", "Synthetic singing",
+        "Laughter", "Baby laughter", "Belly laugh", "Chuckle, chortle",
+        "Crying, sobbing", "Baby cry, infant cry", "Whimper",
+        "Breathing", "Gasp", "Pant", "Snort", "Sigh", "Yawn",
+        "Groan", "Grunt", "Roar",
+        "Cough", "Throat clearing", "Sneeze",
+        "Chewing, mastication", "Biting", "Gulp", "Swallowing",
+        "Burping, eructation", "Hiccup",
+        "Chatter", "Hubbub, speech noise, speech babble",
     }
     music = {
         "Music", "Musical instrument", "Plucked string instrument",
@@ -56,19 +64,18 @@ def _build_category_map() -> Dict[str, str]:
     impact = {
         "Thump, thud", "Slam", "Knock", "Tap", "Hammer",
         "Crash", "Breaking", "Bouncing", "Smash, crash",
-        "Glass", "Shatter",
+        "Glass", "Shatter", "Whack, thwack", "Crack",
     }
     crowd = {
-        "Crowd", "Cheering", "Applause", "Chatter", "Hubbub, speech noise",
-        "Children shouting",
+        "Crowd", "Cheering", "Applause", "Children playing",
     }
     camera = {
-        "Camera", "Single-lens reflex camera", "Shutter",
+        "Camera", "Single-lens reflex camera", "Shutter", "Photographic film",
     }
     alert = {
         "Alarm", "Alarm clock", "Beep, bleep", "Buzzer",
         "Siren", "Telephone bell ringing", "Ringtone",
-        "Smoke detector, smoke alarm", "Fire alarm",
+        "Smoke detector, smoke alarm", "Fire alarm", "Chime", "Bell",
     }
     vehicle = {
         "Vehicle", "Car", "Engine", "Motor vehicle (road)",
@@ -206,19 +213,23 @@ class SoundMapAnalyzer:
         self,
         audio: np.ndarray,
         sr: int,
+        vocals: Optional[np.ndarray] = None,
+        no_vocals: Optional[np.ndarray] = None,
         callback=None,
     ) -> Tuple[List[SoundEvent], List[Tuple[float, float]]]:
-        """Analyze original audio and produce a complete sound map.
+        """Analyze audio and produce a complete sound map.
 
         Args:
             audio: Original audio (channels, samples) or (samples,).
             sr: Sample rate.
+            vocals: Demucs separated vocals stem (optional).
+            no_vocals: Demucs separated non-vocal track (optional).
             callback: Optional status callback.
 
         Returns:
             (sound_events, speech_regions)
             - sound_events: List of all detected non-speech sound events.
-            - speech_regions: List of (start_sec, end_sec) for speech segments.
+            - speech_regions: List of (start_sec, end_sec) for all human vocal/body regions.
         """
         console.print("\n[bold cyan]🧠 Нейросетевой анализ звуковой карты (на ОРИГИНАЛЬНОМ аудио)...[/]")
 
@@ -227,41 +238,57 @@ class SoundMapAnalyzer:
         else:
             audio_mono = audio.copy()
 
-        # ── Step 1: Detect speech with Silero VAD ─────────────────────
+        # ── Step 1: Detect speech & human sounds (Silero VAD + PANNs + Demucs Vocals) ──
         if callback:
-            callback("Определяем границы речи (Silero VAD)...")
-        speech_regions = self._detect_speech(audio_mono, sr)
-        console.print(f"  Обнаружено речевых сегментов: [bold]{len(speech_regions)}[/]")
+            callback("Определяем границы речи и человеческих звуков...")
+        silero_regions = self._detect_speech(audio_mono, sr)
 
-        # ── Step 2: Detect all sound events with PANNs + Spectral Transient Analysis ─
+        # ── Step 2: Detect all sound events with PANNs ─────────────────
         if callback:
             callback("Нейросеть PANNs анализирует все звуки...")
         raw_events = self._detect_sound_events(audio_mono, sr)
 
-        # Merge in sharp physical transients from spectral analysis
-        # to ensure no impacts/clicks/shots are missed even under loud speech
-        spectral_events = self._spectral_fallback(audio_mono, sr)
+        # Extract PANNs events classified as speech/human sound (breathing, grunts, chewing, etc.)
+        panns_speech_events = [e for e in raw_events if e.category == "speech"]
+        panns_speech_regions = [(e.start_sec, e.end_sec) for e in panns_speech_events]
+
+        # Extract vocal energy regions from Demucs vocals stem (captures breaths, mouth noises, whispers)
+        vocal_energy_regions = []
+        if vocals is not None:
+            vocal_energy_regions = self._detect_vocals_energy(vocals, sr, threshold=0.005, pad_sec=0.10)
+
+        # Merge all human sound sources to form the complete Human Vocal Mask
+        all_human_regions = self._merge_regions(
+            silero_regions + panns_speech_regions + vocal_energy_regions,
+            merge_gap=0.18,
+        )
+        # Filter minimum duration 0.20s
+        speech_regions = [r for r in all_human_regions if r[1] - r[0] >= 0.20]
+        console.print(f"  Обнаружено сегментов с человеческими звуками: [bold]{len(speech_regions)}[/]")
+
+        # ── Step 3: Non-speech events & transient analysis ────────────
+        raw_non_speech = [e for e in raw_events if e.category != "speech"]
+
+        # Run spectral/transient analysis on no_vocals (where speech masking is absent)
+        transient_source = no_vocals if no_vocals is not None else audio_mono
+        spectral_events = self._detect_transient_events(transient_source, sr)
+
         for sev in spectral_events:
-            # Only add if not already covered by a PANNs event of similar category
             already_covered = any(
                 ev.category == sev.category and ev.overlaps_with(sev.start_sec - 0.2, sev.end_sec + 0.2)
-                for ev in raw_events
+                for ev in raw_non_speech
             )
             if not already_covered:
-                raw_events.append(sev)
+                raw_non_speech.append(sev)
 
-        raw_events = self._deduplicate_events(raw_events)
-        console.print(f"  Обнаружено звуковых событий: [bold]{len(raw_events)}[/]")
+        non_speech_events = self._deduplicate_events(raw_non_speech)
+        console.print(f"  Обнаружено не-речевых звуковых событий: [bold]{len(non_speech_events)}[/]")
 
-        # ── Step 3: Mark events that overlap with speech ──────────────
-        for event in raw_events:
-            for sp_start, sp_end in speech_regions:
-                if event.overlaps_with(sp_start, sp_end):
-                    event.overlaps_speech = True
-                    break
-
-        # ── Step 4: Filter out pure speech events ─────────────────────
-        non_speech_events = [e for e in raw_events if e.category != "speech"]
+        # ── Step 4: Mark events that overlap with speech/human sounds ───
+        for event in non_speech_events:
+            event.overlaps_speech = any(
+                event.overlaps_with(sp_start, sp_end) for sp_start, sp_end in speech_regions
+            )
 
         self._print_summary(non_speech_events, speech_regions)
         return non_speech_events, speech_regions
@@ -426,12 +453,59 @@ class SoundMapAnalyzer:
         events = self._deduplicate_events(events)
         return events
 
-    def _spectral_fallback(self, audio_mono: np.ndarray, sr: int) -> List[SoundEvent]:
-        """Fallback spectral analysis when PANNs is unavailable."""
+    def _detect_vocals_energy(
+        self,
+        vocals: Optional[np.ndarray],
+        sr: int,
+        threshold: float = 0.005,
+        pad_sec: float = 0.10,
+    ) -> List[Tuple[float, float]]:
+        """Detect human vocal energy from Demucs vocals stem (words, breaths, grunts, chewing, etc.)."""
+        if vocals is None:
+            return []
+        v_mono = np.mean(vocals, axis=0) if vocals.ndim > 1 else vocals
+        frame_len = int(0.020 * sr)
+        hop_len = int(0.010 * sr)
+        total_samples = len(v_mono)
+        num_frames = (total_samples - frame_len) // hop_len
+        if num_frames <= 0:
+            return []
+
+        from numpy.lib.stride_tricks import as_strided
+        shape = (num_frames, frame_len)
+        strides = (v_mono.strides[0] * hop_len, v_mono.strides[0])
+        frames = as_strided(v_mono, shape=shape, strides=strides)
+        rms = np.sqrt(np.mean(frames ** 2, axis=1))
+
+        active = rms > threshold
+        if not np.any(active):
+            return []
+
+        regions: List[Tuple[float, float]] = []
+        in_r = False
+        st = 0.0
+        for i, a in enumerate(active):
+            t = i * hop_len / sr
+            if a and not in_r:
+                st = max(0.0, t - pad_sec)
+                in_r = True
+            elif not a and in_r:
+                en = min(total_samples / sr, t + pad_sec)
+                regions.append((st, en))
+                in_r = False
+        if in_r:
+            regions.append((st, total_samples / sr))
+
+        return self._merge_regions(regions, merge_gap=0.15)
+
+    def _detect_transient_events(self, audio: np.ndarray, sr: int) -> List[SoundEvent]:
+        """Detect physical transient sounds (clicks, typing, gunshots, impacts, beeps)
+        via onset and spectral feature analysis."""
         from clearsound.core.audio_utils import (
             compute_crest_factor, compute_spectral_centroid,
             compute_spectral_flatness, compute_tonal_signature,
         )
+        audio_mono = np.mean(audio, axis=0) if audio.ndim > 1 else audio
         events = []
         onset_frames = librosa.onset.onset_detect(
             y=audio_mono, sr=sr, hop_length=512, backtrack=True, units='frames',
@@ -440,12 +514,12 @@ class SoundMapAnalyzer:
 
         for onset_sec in onset_times:
             start = int(onset_sec * sr)
-            end = min(start + int(0.5 * sr), len(audio_mono))
+            end = min(start + int(0.25 * sr), len(audio_mono))
             seg = audio_mono[start:end]
             if len(seg) < 512:
                 continue
             rms = float(np.sqrt(np.mean(seg ** 2)))
-            if rms < 0.01:
+            if rms < 0.005:
                 continue
             crest = compute_crest_factor(seg)
             centroid = float(np.mean(compute_spectral_centroid(seg, sr)))
@@ -453,21 +527,29 @@ class SoundMapAnalyzer:
 
             if is_tonal:
                 label, cat = "Beep, bleep", "alert"
-            elif crest > 10 and centroid > 2000:
+            elif crest > 8.0 and centroid > 2200:
                 label, cat = "Gunshot, gunfire", "gunshot"
-            elif crest > 8 and centroid < 500:
+            elif crest > 7.0 and centroid < 600:
                 label, cat = "Explosion", "explosion"
-            elif crest > 6:
+            elif centroid >= 2000 and centroid <= 5500 and crest > 4.5:
+                label, cat = "Camera", "camera"
+            elif crest > 4.5 and centroid < 2000:
                 label, cat = "Thump, thud", "impact"
+            elif crest > 3.8 and centroid > 3000:
+                label, cat = "Typing", "foley"
             else:
                 continue
 
             events.append(SoundEvent(
                 label=label, category=cat,
-                start_sec=onset_sec, end_sec=onset_sec + len(seg) / sr,
-                confidence=min(0.9, rms * 5),
+                start_sec=onset_sec, end_sec=onset_sec + min(0.3, len(seg) / sr),
+                confidence=min(0.95, rms * 6 + (crest / 20.0) * 0.3),
             ))
         return events
+
+    def _spectral_fallback(self, audio_mono: np.ndarray, sr: int) -> List[SoundEvent]:
+        """Fallback spectral analysis when PANNs is unavailable."""
+        return self._detect_transient_events(audio_mono, sr)
 
     # ── Utility Methods ───────────────────────────────────────────────
 

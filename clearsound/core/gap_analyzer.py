@@ -110,9 +110,9 @@ class GapAnalyzer:
         orig_mono = self._to_mono(original)
         novoc_mono = self._to_mono(no_vocals)
 
-        # ── Step 1: Neural sound map on ORIGINAL audio ────────────────
+        # ── Step 1: Neural sound map on ORIGINAL audio + stems ────────
         sound_events, speech_regions = self._sound_map_analyzer.analyze(
-            original, sr, callback=callback,
+            original, sr, vocals=vocals, no_vocals=no_vocals, callback=callback,
         )
 
         # ── Step 2: Merge close speech regions ────────────────────────

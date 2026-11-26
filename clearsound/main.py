@@ -116,7 +116,7 @@ def run_pipeline(
     # ── Step 2: Analyze gaps ──────────────────────────────────────────
     console.print("\n[bold]═══ Шаг 2: Анализ звуковых пробелов ═══[/]")
     analyzer = GapAnalyzer(config)
-    gaps = analyzer.analyze(original, no_vocals, vocals, sr)
+    gaps, sound_events, speech_regions = analyzer.analyze(original, no_vocals, vocals, sr)
 
     if not gaps:
         console.print("[yellow]Голосовых сегментов не найдено. "
@@ -143,7 +143,7 @@ def run_pipeline(
     # ── Step 4: Insert sounds ─────────────────────────────────────────
     console.print("\n[bold]═══ Шаг 4: Вставка звуков ═══[/]")
     inserter = SoundInserter(config)
-    enhanced = inserter.insert(no_vocals, gaps, matches, sr, vocals=vocals)
+    enhanced = inserter.insert(no_vocals, gaps, matches, sr, vocals=vocals, original=original)
 
     # ── Step 5: Interactive preview ───────────────────────────────────
     if interactive:
@@ -157,7 +157,7 @@ def run_pipeline(
         if vol_adj:
             console.print("\n[dim]Применяем коррективы...[/]")
             final_audio = inserter.insert(
-                no_vocals, gaps, matches, sr, volume_adjustments=vol_adj, vocals=vocals
+                no_vocals, gaps, matches, sr, volume_adjustments=vol_adj, vocals=vocals, original=original
             )
     else:
         final_audio = enhanced

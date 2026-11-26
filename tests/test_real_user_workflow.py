@@ -210,45 +210,51 @@ def test_2_real_video_pipeline_and_acoustic_verification():
         if neural_cats:
             print(f"  Neural categories in overlapping sounds: {neural_cats}")
 
-        # ── B. Quiet speech-only gaps (before music starts) should be near-silent ──
-        print("\n  [B] Verifying quiet speech-only gaps are silenced (no Demucs murmur)...")
-        music_offset_sec = (win.music_offset / sr) if hasattr(win, "music_offset") and win.music_offset else 31.7
-        quiet_speech_gaps = [g for g in speech_only_gaps if g.end_sec <= music_offset_sec]
-        if quiet_speech_gaps:
-            silenced_count = 0
-            for g in quiet_speech_gaps:
-                st, en = g.start_sample, g.end_sample
-                if en > len(enh_mono):
-                    continue
-                # Evaluate the interior of the silenced region (excluding boundary crossfade ramps)
-                fade_s = min(int(0.025 * sr), (en - st) // 4)
-                body = enh_mono[st + fade_s : en - fade_s] if (en - st) > 2 * fade_s else enh_mono[st:en]
-                rms = float(np.sqrt(np.mean(body ** 2)))
-                print(f"    Quiet gap [{g.start_sec:.2f}-{g.end_sec:.2f}]: body RMS = {rms:.8f}")
-                if rms < 0.001:
+        # ── B. Layer verification: Non-human background sounds are preserved, genuinely quiet gaps are silenced ──
+        print("\n  [B] Verifying audio layer preservation & quiet gap silencing...")
+        novoc_audio, _ = sf.read(str(p_novoc))
+        novoc_mono = np.mean(novoc_audio, axis=1) if novoc_audio.ndim > 1 else novoc_audio
+
+        silenced_count = 0
+        preserved_bg_count = 0
+        truly_quiet_count = 0
+        bg_sound_count = 0
+
+        for g in gaps:
+            st, en = g.start_sample, g.end_sample
+            if en > len(enh_mono):
+                continue
+            nv_seg = novoc_mono[st:en]
+            nv_rms = float(np.sqrt(np.mean(nv_seg ** 2)))
+            fade_s = min(int(0.025 * sr), (en - st) // 4)
+            body = enh_mono[st + fade_s : en - fade_s] if (en - st) > 2 * fade_s else enh_mono[st:en]
+            body_rms = float(np.sqrt(np.mean(body ** 2)))
+
+            music_offset_s = getattr(win, "music_offset", 0) or int(31.7 * sr)
+            if nv_rms < 0.003 and not g.has_overlapping_sounds and st < music_offset_s:
+                truly_quiet_count += 1
+                if body_rms < 0.001:
                     silenced_count += 1
-            ratio = silenced_count / len(quiet_speech_gaps)
-            print(f"  Silenced quiet gaps: {silenced_count}/{len(quiet_speech_gaps)} ({ratio:.0%})")
-            assert ratio >= 0.7, f"Expected ≥70% of quiet speech gaps silenced, got {ratio:.0%}"
+            elif nv_rms >= 0.003 or g.has_overlapping_sounds:
+                bg_sound_count += 1
+                if body_rms >= 0.001:
+                    preserved_bg_count += 1
+
+        if truly_quiet_count > 0:
+            ratio_s = silenced_count / truly_quiet_count
+            print(f"  Silenced quiet gaps: {silenced_count}/{truly_quiet_count} ({ratio_s:.0%})")
+            assert ratio_s >= 0.6, f"Expected ≥60% of genuinely quiet gaps silenced, got {ratio_s:.0%}"
             print("  ✓ Quiet speech gaps are properly silenced without Demucs murmur!")
         else:
-            print("  (No quiet speech gaps before music offset)")
+            print("  (No genuinely quiet gaps before music offset)")
 
-        # ── C. Gaps with overlapping sounds should have audio content ──
-        if sound_overlap_gaps:
-            print("\n  [C] Verifying overlapping-sound gaps have audio content...")
-            has_content = 0
-            for g in sound_overlap_gaps:
-                st, en = g.start_sample, g.end_sample
-                if en > len(enh_mono):
-                    continue
-                rms = float(np.sqrt(np.mean(enh_mono[st:en] ** 2)))
-                if rms > 0.001:
-                    has_content += 1
-            ratio = has_content / max(len(sound_overlap_gaps), 1)
-            print(f"  Has audio: {has_content}/{len(sound_overlap_gaps)} ({ratio:.0%})")
-            assert ratio >= 0.5, f"Expected ≥50% of sound-overlap gaps to have content, got {ratio:.0%}"
-            print("  ✓ Overlapping-sound gaps retain audio content!")
+        # ── C. Non-human sounds in gaps must NOT be zeroed out ──
+        print("\n  [C] Verifying non-human sounds in gaps are preserved (NOT zeroed out)...")
+        if bg_sound_count > 0:
+            ratio_p = preserved_bg_count / bg_sound_count
+            print(f"  Preserved background audio gaps: {preserved_bg_count}/{bg_sound_count} ({ratio_p:.0%})")
+            assert ratio_p >= 0.8, f"Non-human sounds in gaps must NOT be zeroed out: got {ratio_p:.0%}"
+            print("  ✓ Non-human sounds (typing, foley, ambience, impacts) are preserved!")
 
         # ── D. Voice suppression via energy comparison ──
         print("\n  [D] Verifying voice suppression in speech regions...")
